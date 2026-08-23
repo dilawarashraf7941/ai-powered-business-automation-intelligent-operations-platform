@@ -55,6 +55,8 @@ class RecommendedNextStep(StrEnum):
     CONTACT_HUMAN = "CONTACT_HUMAN"
     REQUEST_INFORMATION = "REQUEST_INFORMATION"
     ESCALATE = "ESCALATE"
+    SCHEDULE_CONSULTATION = "SCHEDULE_CONSULTATION"
+    NURTURE = "NURTURE"
 
 
 type Reason = Annotated[str, Field(min_length=1, max_length=MAX_REASON_LENGTH)]

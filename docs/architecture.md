@@ -1,9 +1,9 @@
 # Architecture
 
-Phase 3 adds advisory structured analysis after normalization and classification. No action is
+Phase 4 adds deterministic policy evaluation after advisory structured analysis. No action is
 executed.
 
-## Phase 3 shape
+## Phase 4 shape
 
 The project uses a compact `src` layout with responsibilities split by boundary:
 
@@ -11,8 +11,8 @@ The project uses a compact `src` layout with responsibilities split by boundary:
 | --- | --- |
 | `main.py` | Application construction and explicit middleware/handler registration |
 | `api/` | HTTP routes and stable public error contracts |
-| `models/` | Closed taxonomies, strict external input, and canonical internal events |
-| `services/` | Side-effect-free normalization, canonicalization, and classification |
+| `models/` | Strict events, intelligence, policy results, and closed taxonomies |
+| `services/` | Normalization, advisory analysis, and pure deterministic policy |
 | `providers/` | Provider protocol, stable failures, and isolated OpenAI adapter |
 | `config/` | Validated server-owned settings |
 | `logging/` | Allowlisted JSON log serialization and reusable redaction |
@@ -20,7 +20,7 @@ The project uses a compact `src` layout with responsibilities split by boundary:
 
 ## API boundary
 
-HTTP is the only application boundary in Phase 2. Middleware first assigns a cryptographically
+HTTP is the only application boundary. Middleware first assigns a cryptographically
 random request ID and then reads at most the configured request-body ceiling. FastAPI parses only a
 body that has already passed this limit. Pydantic then validates the event envelope and recursively
 checks its payload. Routes receive validated models rather than raw dictionaries.
@@ -65,12 +65,34 @@ revalidates the returned mapping, attaches authoritative event identity/category
 the advisory result.
 
 No prompt, headers, cookies, server settings, credentials, internal metadata, or filesystem details
-cross the provider boundary. No raw provider response crosses the API boundary. Later action policy,
-approval, workflow, integration, persistence, and automation layers remain explicitly absent.
+cross the provider boundary. No raw provider response crosses the API boundary.
+
+## Deterministic policy boundary
+
+`POST /api/v1/events/decide` normalizes the submitted event, reuses
+`BusinessIntelligenceService`, and passes only the validated canonical event and validated
+`BusinessIntelligenceResult` to `DeterministicPolicyEngine`. The engine is provider-independent,
+has no I/O, and returns an immutable evaluation from policy version `1.0`. A separate wrapper adds
+`generated_at` after calculation and emits allowlisted operational logs.
+
+The pure calculation uses a `0.85` server-owned confidence threshold and closed event, AI, action,
+decision, risk, and evidence enums. It never uses time, randomness, environment-dependent logic,
+network state, headers, prompts, raw responses, or payload text. Identical inputs and version always
+produce the same evaluation.
+
+Rule precedence is fail-closed: invalid version, event identity mismatch, deterministic category
+mismatch, or absent AI reasons returns `DENY`. A `NONE` recommendation conflicting with `HIGH` or
+`CRITICAL` priority or `HIGH` urgency is also denied. Otherwise low confidence, high/critical
+priority, high urgency, unknown intent, and `CONTACT_HUMAN`, `REQUEST_INFORMATION`, `ESCALATE`,
+`SCHEDULE_CONSULTATION`, or `NURTURE` require human approval. Clean `NONE` and low-risk `REVIEW`
+produce `ALLOW`. `ESCALATE` and high signals elevate risk deterministically.
+
+`ALLOW` is a policy result, not an execution command. Human approval persistence, action execution,
+workflow, integration, persistence, and automation layers remain absent.
 
 ## Future AI evolution
 
-The Phase 3 AI boundary is analysis-only. Any future expansion requires separate budget controls,
+The AI boundary remains analysis-only. Any future expansion requires separate budget controls,
 model allowlists, audit policy, authorization, and threat modeling. Untrusted event data and model
 output must never gain authority merely because a model processed or generated them.
 

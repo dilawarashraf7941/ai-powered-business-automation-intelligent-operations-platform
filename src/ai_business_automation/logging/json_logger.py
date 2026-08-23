@@ -28,6 +28,10 @@ _ALLOWED_EXTRA = (
     "error_category",
     "provider",
     "latency_ms",
+    "decision",
+    "action",
+    "risk",
+    "policy_version",
 )
 
 

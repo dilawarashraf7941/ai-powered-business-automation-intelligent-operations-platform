@@ -1,4 +1,4 @@
-"""Source-level enforcement of Phase 2 capability exclusions."""
+"""Source-level enforcement of Phase 4 capability exclusions."""
 
 import ast
 import re
@@ -74,6 +74,31 @@ def test_no_action_framework_or_business_integration_is_present() -> None:
     combined = "\n".join(path.read_text(encoding="utf-8").lower() for path in SOURCE.rglob("*.py"))
     for prohibited in ("langchain", "langgraph", "crewai", "autogen", "n8n", "ghl"):
         assert prohibited not in combined
+
+
+def test_policy_engine_has_no_provider_network_execution_or_environment_imports() -> None:
+    policy_path = SOURCE / "ai_business_automation" / "services" / "policy.py"
+    tree = ast.parse(policy_path.read_text(encoding="utf-8"), filename=str(policy_path))
+    forbidden_roots = {"openai", "requests", "httpx", "urllib", "socket", "subprocess", "os"}
+    imported_roots = {
+        alias.name.split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+    imported_roots.update(
+        (node.module or "").split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+    )
+    assert imported_roots.isdisjoint(forbidden_roots)
+    assert "BusinessIntelligenceService" not in policy_path.read_text(encoding="utf-8")
+
+
+def test_decision_endpoint_accepts_only_the_strict_external_event() -> None:
+    routes = (SOURCE / "ai_business_automation" / "api" / "routes.py").read_text(encoding="utf-8")
+    assert "async def decide_event(\n    event: ExternalEvent," in routes
+    assert "event: PolicyDecision" not in routes
 
 
 def test_environment_file_is_ignored_and_not_tracked() -> None:

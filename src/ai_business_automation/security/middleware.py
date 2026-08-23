@@ -173,5 +173,6 @@ def _operation_name(method: str, path: str) -> str:
         ("GET", "/health"): "health_check",
         ("POST", "/api/v1/events"): "create_event",
         ("POST", "/api/v1/events/analyze"): "analyze_event",
+        ("POST", "/api/v1/events/decide"): "decide_event",
     }
     return known.get((method, path), "unmatched_route")

@@ -1,9 +1,8 @@
 # AI-Powered Business Automation & Intelligent Operations Platform
 
-This repository contains the secure Phase 3 advisory intelligence boundary for a future business
-automation and intelligent operations platform. It normalizes a closed taxonomy of events and can
-send a bounded canonical representation through a provider-isolated AI adapter for strictly
-validated, structured business analysis.
+This repository contains the secure Phase 4 deterministic decision boundary for a future business
+automation and intelligent operations platform. It normalizes bounded events, obtains strictly
+validated advisory AI analysis, and evaluates that analysis through a closed, versioned policy.
 
 > **AI IS ADVISORY ONLY.**
 >
@@ -14,8 +13,10 @@ validated, structured business analysis.
 > **NO AUTONOMOUS ACTIONS ARE IMPLEMENTED.**
 >
 > **NO WORKFLOW EXECUTION IS IMPLEMENTED.**
+>
+> **AI recommends. Policy decides. Execution is a separate future boundary.**
 
-## Current Phase 3 scope
+## Current Phase 4 scope
 
 - Python 3.12 project using a `src` layout
 - Strict environment configuration through `APP_` variables
@@ -25,6 +26,8 @@ validated, structured business analysis.
 - Canonical sorted UTF-8 serialization with an 8 KiB internal ceiling
 - Provider-neutral advisory analysis interface with one isolated OpenAI adapter
 - Bounded, server-owned prompt policy and strict structured AI output
+- Pure deterministic policy version `1.0` with a server-owned `0.85` confidence threshold
+- Closed decisions, recommended actions, risk levels, and bounded explanatory evidence
 - Stable provider failure categories with a 1–60 second timeout range and no retries
 - 16 KiB request-body ceiling enforced before framework body parsing
 - Safe JSON request-completion logs and server-generated correlation IDs
@@ -33,9 +36,10 @@ validated, structured business analysis.
 
 ## Architecture
 
-The API layer accepts HTTP input and maps it into strict Pydantic models. The service layer is
-currently a side-effect-free acknowledgement function. Configuration, logging, and security
-middleware are separated into focused packages. There is no persistence or outbound adapter.
+The API layer accepts HTTP input and maps it into strict Pydantic models. Side-effect-free services
+normalize and classify events, isolate advisory AI access, and apply deterministic policy.
+Configuration, logging, and security middleware are separated into focused packages. The fixed
+OpenAI adapter is the only outbound boundary; policy evaluation performs no networking.
 
 See [Architecture](docs/architecture.md) and [Security](docs/security.md) for the trust boundaries
 and design rationale.
@@ -86,6 +90,32 @@ return the prompt, raw provider response, payload, internal metadata, model, or 
 
 The endpoint requires configured provider credentials. Without them it fails deterministically
 with `AI_CONFIGURATION` and makes no network call.
+
+### `POST /api/v1/events/decide`
+
+Accepts the same strict external event, reuses the Phase 3 analysis boundary, and evaluates policy
+version `1.0`. It returns only the authoritative decision, recommended action, risk, policy version,
+confidence threshold, bounded evidence codes, event ID, and server-generated timestamp. Clients
+cannot submit or override policy fields. AI failure produces a safe error and no policy decision.
+
+`ALLOW` means only that policy permits the recommendation. It never executes the recommendation.
+
+## Deterministic policy
+
+Decision outcomes are `ALLOW`, `REQUIRE_HUMAN_APPROVAL`, and `DENY`. Recommended actions are
+`NONE`, `REVIEW`, `CONTACT_HUMAN`, `REQUEST_INFORMATION`, `ESCALATE`,
+`SCHEDULE_CONSULTATION`, and `NURTURE`. Risk is one of `LOW`, `MEDIUM`, `HIGH`, or `CRITICAL`.
+
+The confidence threshold defaults to `0.85` and is bounded from `0.0` to `1.0` through the
+server-owned `APP_POLICY_CONFIDENCE_THRESHOLD` setting. The client cannot select the version,
+threshold, rules, decision, action, risk, or evidence. The pure calculation does not read time,
+environment, network state, randomness, or mutable state; `generated_at` is attached afterward.
+
+Clean `NONE` and low-risk `REVIEW` recommendations may be allowed. Low confidence, elevated
+priority, high urgency, unknown intent, and all other actionable recommendations require human
+approval. Identity/category mismatches, invalid versions, missing AI reasons, and contradictory
+`NONE` plus high-priority/high-urgency signals are denied. Evidence uses only closed codes and
+bounded enum or confidence values; it never contains payloads, prompts, reasons, or secrets.
 
 ## Event normalization and classification
 
@@ -160,10 +190,11 @@ Coverage is required to remain at or above 95%.
 
 ## Current limitations
 
-Phase 3 intentionally has no authentication, database, queue, event persistence, business
+Phase 4 intentionally has no authentication, database, queue, event persistence, business
 integration, workflow engine, tool calling, AI memory, or autonomous action mechanism. The only
 outbound boundary is the fixed OpenAI provider adapter. Analysis is advisory and does not promise
-durable or idempotent processing. No action is executed.
+durable or idempotent processing. Human approvals are not persisted or performed. No action is
+executed.
 
 ## Roadmap
 

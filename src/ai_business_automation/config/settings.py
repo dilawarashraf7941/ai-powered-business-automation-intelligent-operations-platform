@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     ai_timeout_seconds: float = Field(default=15.0, ge=1.0, le=60.0)
     ai_max_input_bytes: int = Field(default=8_192, ge=1_024, le=16_384)
     ai_max_output_tokens: int = Field(default=800, ge=128, le=2_048)
+    policy_confidence_threshold: float = Field(default=0.85, ge=0.0, le=1.0)
 
     @model_validator(mode="after")
     def require_production_ai_credentials(self) -> "Settings":

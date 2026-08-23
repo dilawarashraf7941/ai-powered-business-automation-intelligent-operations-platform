@@ -29,7 +29,7 @@ they are not a substitute for authorization in later phases.
 `occurred_at` must be a bounded ISO-8601 string with an explicit numeric offset. Naive, malformed,
 more-than-365-day-old, and more-than-five-minute-future values are rejected. Accepted times and the
 server-generated `received_at` are stored in UTC. Canonical JSON has sorted keys, deterministic enum
-and datetime rendering, UTF-8 encoding, and an 8 KiB output limit. Phase 3 creates no signatures,
+and datetime rendering, UTF-8 encoding, and an 8 KiB output limit. Phase 4 creates no signatures,
 hashes, or provenance claims.
 
 ## Request size handling
@@ -40,8 +40,9 @@ FastAPI or Pydantic parses them. The setting is bounded from 1 KiB to 1 MiB; the
 
 ## Configuration and secrets
 
-Settings use `pydantic-settings`, require the `APP_` prefix, and validate environment, log level, and
-body and AI limits. The OpenAI key uses `SecretStr`, is mandatory in production, and is omitted from
+Settings use `pydantic-settings`, require the `APP_` prefix, and validate environment, log level,
+body, AI, and policy-threshold limits. The confidence threshold is server-owned and bounded from
+zero through one. The OpenAI key uses `SecretStr`, is mandatory in production, and is omitted from
 the example environment file. `.env` is ignored and must not be tracked. Settings and secrets are
 never returned from an endpoint or written to logs.
 
@@ -80,7 +81,7 @@ allowlist; wildcard CORS is not acceptable.
 Production code contains no dynamic evaluation, shell or subprocess access, arbitrary imports,
 generic HTTP client, client-controlled URL construction, persistence adapter, external business
 integration, workflow runner, or autonomous action facility. The isolated OpenAI adapter is the
-only outbound provider boundary. A focused AST-based security scan and tests guard these Phase 3
+only outbound provider boundary. A focused AST-based security scan and tests guard these Phase 4
 exclusions. No event is persisted, deduplicated, queued, or processed in the background.
 
 ## AI input and prompt-injection controls
@@ -114,3 +115,35 @@ bounded latency. Events, customer text, prompts, responses, credentials, headers
 logged. The official OpenAI SDK exists only in the provider adapter. Requests include no tools,
 functions, web search, code interpreter, conversation state, or arbitrary URL. AI is advisory only
 and cannot execute actions, call GHL or n8n, invoke workflows, or modify business state.
+
+## Policy trust boundary
+
+AI output is untrusted until Phase 3 strict validation succeeds. The pure policy engine accepts only
+the validated canonical event and validated intelligence result. It does not accept HTTP models,
+raw provider data, prompts, headers, credentials, environment variables, or arbitrary dictionaries.
+Clients submitting policy version, threshold, decision, action, risk, or evidence fields are
+rejected by the strict external-event envelope before AI analysis.
+
+Policy version `1.0`, the bounded `0.85` threshold, rule precedence, decision outcomes, action
+taxonomy, risk levels, and evidence codes are server-owned and closed. Evidence is limited to eight
+entries and may contain only a closed code/source and a bounded enum or confidence value. It never
+copies event payloads, AI summaries/reasons, prompts, raw responses, URLs, or secrets.
+
+## Fail-closed policy and conflict rules
+
+Invalid policy version, mismatched event identity, intelligence category inconsistent with the
+deterministic event classification, and missing AI reasons produce `DENY` with action `NONE`.
+`NONE` combined with `HIGH`/`CRITICAL` priority or `HIGH` urgency is the only signal-combination
+conflict and also produces `DENY`. `HIGH` priority plus `LOW` urgency is valid but requires human
+approval. `UNKNOWN` intent plus an actionable recommendation is valid but requires approval.
+
+All other policy triggers are documented in the architecture. The calculation has no network,
+filesystem, time, randomness, environment, tool, workflow, or action capability. Server time is
+attached after the pure calculation. AI failure stops processing and returns the existing bounded
+AI error; it is never converted to `ALLOW`.
+
+Policy logs contain only allowlisted request/event identifiers, decision, action, risk, policy
+version, event type, and outcome. They exclude events, payloads, customer text, AI content, headers,
+credentials, and secrets.
+
+**AI recommends. Policy decides. Execution is a separate future boundary.**

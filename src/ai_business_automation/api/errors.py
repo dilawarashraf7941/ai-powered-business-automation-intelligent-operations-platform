@@ -31,6 +31,7 @@ def error_response(request: Request, status: int, code: str, message: str) -> JS
     operation_by_path = {
         "/api/v1/events": "create_event",
         "/api/v1/events/analyze": "analyze_event",
+        "/api/v1/events/decide": "decide_event",
     }
     operation = operation_by_path.get(str(request.scope.get("path", "")))
     if request.method == "POST" and operation is not None:

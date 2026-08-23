@@ -51,6 +51,8 @@ def test_production_requires_provider_credentials() -> None:
         ("ai_timeout_seconds", 61),
         ("ai_max_input_bytes", 100),
         ("ai_max_output_tokens", 10_000),
+        ("policy_confidence_threshold", -0.01),
+        ("policy_confidence_threshold", 1.01),
     ],
 )
 def test_invalid_ai_configuration_is_rejected(field: str, value: object) -> None:

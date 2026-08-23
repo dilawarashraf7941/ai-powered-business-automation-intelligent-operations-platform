@@ -5,6 +5,7 @@ from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException
 
 from ai_business_automation.api.errors import (
+    ai_analysis_error_handler,
     http_error_handler,
     normalization_error_handler,
     unexpected_error_handler,
@@ -13,6 +14,7 @@ from ai_business_automation.api.errors import (
 from ai_business_automation.api.routes import router
 from ai_business_automation.config import Settings, get_settings
 from ai_business_automation.logging import configure_logging
+from ai_business_automation.providers import AIAnalysisError
 from ai_business_automation.security.middleware import (
     RequestBodyLimitMiddleware,
     RequestContextMiddleware,
@@ -43,6 +45,12 @@ async def _normalization_error_adapter(request: Request, exc: Exception) -> Resp
     return await normalization_error_handler(request, exc)
 
 
+async def _ai_error_adapter(request: Request, exc: Exception) -> Response:
+    if not isinstance(exc, AIAnalysisError):
+        return await unexpected_error_handler(request, exc)
+    return await ai_analysis_error_handler(request, exc)
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Build an application using validated, server-owned settings."""
 
@@ -56,6 +64,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.add_exception_handler(RequestValidationError, _validation_error_adapter)
     application.add_exception_handler(HTTPException, _http_error_adapter)
     application.add_exception_handler(EventNormalizationError, _normalization_error_adapter)
+    application.add_exception_handler(AIAnalysisError, _ai_error_adapter)
     application.add_exception_handler(Exception, unexpected_error_handler)
     application.include_router(router)
     application.add_middleware(SafeExceptionMiddleware)

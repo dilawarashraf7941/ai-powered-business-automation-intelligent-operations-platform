@@ -26,6 +26,8 @@ _ALLOWED_EXTRA = (
     "source",
     "category",
     "error_category",
+    "provider",
+    "latency_ms",
 )
 
 

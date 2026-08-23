@@ -29,7 +29,7 @@ they are not a substitute for authorization in later phases.
 `occurred_at` must be a bounded ISO-8601 string with an explicit numeric offset. Naive, malformed,
 more-than-365-day-old, and more-than-five-minute-future values are rejected. Accepted times and the
 server-generated `received_at` are stored in UTC. Canonical JSON has sorted keys, deterministic enum
-and datetime rendering, UTF-8 encoding, and an 8 KiB output limit. Phase 2 creates no signatures,
+and datetime rendering, UTF-8 encoding, and an 8 KiB output limit. Phase 3 creates no signatures,
 hashes, or provenance claims.
 
 ## Request size handling
@@ -41,8 +41,9 @@ FastAPI or Pydantic parses them. The setting is bounded from 1 KiB to 1 MiB; the
 ## Configuration and secrets
 
 Settings use `pydantic-settings`, require the `APP_` prefix, and validate environment, log level, and
-body limit. Phase 2 defines no credential settings because it has no providers. `.env` is ignored
-and must not be tracked. Settings are never returned from an endpoint or written to logs.
+body and AI limits. The OpenAI key uses `SecretStr`, is mandatory in production, and is omitted from
+the example environment file. `.env` is ignored and must not be tracked. Settings and secrets are
+never returned from an endpoint or written to logs.
 
 ## Logging restrictions
 
@@ -77,6 +78,39 @@ allowlist; wildcard CORS is not acceptable.
 ## Excluded dangerous capabilities
 
 Production code contains no dynamic evaluation, shell or subprocess access, arbitrary imports,
-outbound HTTP client, URL construction, persistence adapter, external integration, workflow runner,
-AI provider, or autonomous action facility. A focused AST-based security scan and tests guard these
-Phase 2 exclusions. No event is persisted, deduplicated, queued, or processed in the background.
+generic HTTP client, client-controlled URL construction, persistence adapter, external business
+integration, workflow runner, or autonomous action facility. The isolated OpenAI adapter is the
+only outbound provider boundary. A focused AST-based security scan and tests guard these Phase 3
+exclusions. No event is persisted, deduplicated, queued, or processed in the background.
+
+## AI input and prompt-injection controls
+
+The AI input is an allowlisted subset of the canonical event: authoritative event ID, closed event
+type/source, UTC timestamps, and the already bounded payload. Request headers, cookies, request
+metadata, internal metadata, configuration, secrets, and environment variables are excluded. The
+server instruction and delimited event together may not exceed 8 KiB.
+
+The fixed instruction identifies all payload content as untrusted data, forbids following embedded
+instructions, and forbids code, credentials, tools, URLs, HTTP requests, and external actions. The
+client cannot supply prompts, models, temperatures, response formats, tools, or provider endpoints.
+Prompt injection cannot be mathematically eliminated; its impact is constrained because the model
+has no tools or business-action capability and all output is structurally revalidated.
+
+## AI output and provider failures
+
+Raw output is capped at 4 KiB and must match a strict model with no unknown fields: confidence
+0.0–1.0, summary up to 500 characters, at most five 250-character reasons, and closed priority,
+urgency, intent, and recommended-step enums. Capability-bearing text is rejected. The provider is
+also limited to 800 output tokens by default.
+
+Timeout is a server setting bounded to 1–60 seconds. The SDK and application perform zero retries.
+Timeout, rate limit, authentication, provider, invalid-output, configuration, and unavailable
+failures map to stable categories without raw exception details.
+
+## AI logging and tool isolation
+
+AI logs contain only allowlisted event ID/type, provider name, outcome, stable failure category, and
+bounded latency. Events, customer text, prompts, responses, credentials, headers, and PII are never
+logged. The official OpenAI SDK exists only in the provider adapter. Requests include no tools,
+functions, web search, code interpreter, conversation state, or arbitrary URL. AI is advisory only
+and cannot execute actions, call GHL or n8n, invoke workflows, or modify business state.

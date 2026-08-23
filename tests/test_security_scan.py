@@ -57,6 +57,25 @@ def test_no_hard_coded_secrets_or_unsafe_debug() -> None:
     assert "debug=True" not in combined.replace(" ", "")
 
 
+def test_openai_sdk_is_confined_to_provider_adapter() -> None:
+    importers: list[str] = []
+    for path in SOURCE.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                if any(alias.name.split(".")[0] == "openai" for alias in node.names):
+                    importers.append(path.relative_to(ROOT).as_posix())
+            elif isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "openai":
+                importers.append(path.relative_to(ROOT).as_posix())
+    assert set(importers) == {"src/ai_business_automation/providers/openai.py"}
+
+
+def test_no_action_framework_or_business_integration_is_present() -> None:
+    combined = "\n".join(path.read_text(encoding="utf-8").lower() for path in SOURCE.rglob("*.py"))
+    for prohibited in ("langchain", "langgraph", "crewai", "autogen", "n8n", "ghl"):
+        assert prohibited not in combined
+
+
 def test_environment_file_is_ignored_and_not_tracked() -> None:
     ignore = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
     assert ".env" in ignore

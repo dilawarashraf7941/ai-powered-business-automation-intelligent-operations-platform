@@ -6,8 +6,13 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, Request, status
 from pydantic import BaseModel, ConfigDict
 
+from ai_business_automation.models import BusinessIntelligenceResult
 from ai_business_automation.models.events import EventAcknowledgement, ExternalEvent
 from ai_business_automation.services.events import EventIngestionService
+from ai_business_automation.services.intelligence import BusinessIntelligenceService
+from ai_business_automation.services.intelligence_factory import (
+    get_intelligence_service as _get_intelligence_service,
+)
 
 router = APIRouter()
 _LOGGER = logging.getLogger("ai_business_automation.events")
@@ -16,6 +21,10 @@ _INGESTION_SERVICE = EventIngestionService()
 
 def get_ingestion_service() -> EventIngestionService:
     return _INGESTION_SERVICE
+
+
+def get_intelligence_service() -> BusinessIntelligenceService:
+    return _get_intelligence_service()
 
 
 class HealthResponse(BaseModel):
@@ -57,3 +66,20 @@ async def create_event(
         },
     )
     return result.acknowledgement()
+
+
+@router.post(
+    "/api/v1/events/analyze",
+    response_model=BusinessIntelligenceResult,
+    status_code=status.HTTP_200_OK,
+    tags=["intelligence"],
+)
+async def analyze_event(
+    event: ExternalEvent,
+    intelligence: Annotated[BusinessIntelligenceService, Depends(get_intelligence_service)],
+    ingestion: Annotated[EventIngestionService, Depends(get_ingestion_service)],
+) -> BusinessIntelligenceResult:
+    """Normalize and analyze an event without persistence, tools, or action execution."""
+
+    normalized = ingestion.ingest(event)
+    return await intelligence.analyze(normalized.event, normalized.category)

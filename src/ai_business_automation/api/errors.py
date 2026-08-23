@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
 
 from ai_business_automation.models.events import PayloadLimitError, UnsafePayloadError
+from ai_business_automation.providers import AIAnalysisError
 from ai_business_automation.services.normalization import EventNormalizationError
 
 _LOGGER = logging.getLogger("ai_business_automation.events")
@@ -27,12 +28,17 @@ def _request_id(request: Request) -> str:
 
 
 def error_response(request: Request, status: int, code: str, message: str) -> JSONResponse:
-    if request.method == "POST" and request.scope.get("path") == "/api/v1/events":
+    operation_by_path = {
+        "/api/v1/events": "create_event",
+        "/api/v1/events/analyze": "analyze_event",
+    }
+    operation = operation_by_path.get(str(request.scope.get("path", "")))
+    if request.method == "POST" and operation is not None:
         _LOGGER.info(
             "event_rejected",
             extra={
                 "request_id": _request_id(request),
-                "operation": "create_event",
+                "operation": operation,
                 "error_category": code,
                 "outcome": "rejected",
             },
@@ -72,6 +78,19 @@ async def normalization_error_handler(
     request: Request, exc: EventNormalizationError
 ) -> JSONResponse:
     return error_response(request, 422, exc.code, _ERROR_MESSAGES[exc.code])
+
+
+async def ai_analysis_error_handler(request: Request, exc: AIAnalysisError) -> JSONResponse:
+    status_by_code = {
+        "AI_TIMEOUT": 504,
+        "AI_RATE_LIMIT": 503,
+        "AI_AUTHENTICATION": 503,
+        "AI_PROVIDER_ERROR": 503,
+        "AI_INVALID_OUTPUT": 502,
+        "AI_CONFIGURATION": 503,
+        "AI_UNAVAILABLE": 503,
+    }
+    return error_response(request, status_by_code[exc.code], exc.code, exc.safe_message)
 
 
 async def http_error_handler(request: Request, exc: HTTPException) -> JSONResponse:

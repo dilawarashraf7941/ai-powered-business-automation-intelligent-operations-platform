@@ -1,11 +1,13 @@
 # AI-Powered Business Automation & Intelligent Operations Platform
 
-This repository contains the secure Phase 2 ingestion and normalization boundary for a future
-business automation and intelligent operations platform. It accepts only a closed taxonomy of
-events, creates a canonical internal representation, classifies it deterministically, and returns
-a safe acknowledgement before any higher-risk capabilities are introduced.
+This repository contains the secure Phase 3 advisory intelligence boundary for a future business
+automation and intelligent operations platform. It normalizes a closed taxonomy of events and can
+send a bounded canonical representation through a provider-isolated AI adapter for strictly
+validated, structured business analysis.
 
-> **AI IS NOT IMPLEMENTED IN PHASE 2.**
+> **AI IS ADVISORY ONLY.**
+>
+> **AI CANNOT EXECUTE BUSINESS ACTIONS, CALL GHL OR N8N, OR INVOKE TOOLS.**
 >
 > **NO EXTERNAL BUSINESS INTEGRATIONS ARE IMPLEMENTED.**
 >
@@ -13,7 +15,7 @@ a safe acknowledgement before any higher-risk capabilities are introduced.
 >
 > **NO WORKFLOW EXECUTION IS IMPLEMENTED.**
 
-## Current Phase 2 scope
+## Current Phase 3 scope
 
 - Python 3.12 project using a `src` layout
 - Strict environment configuration through `APP_` variables
@@ -21,6 +23,9 @@ a safe acknowledgement before any higher-risk capabilities are introduced.
 - Closed event/source taxonomies and strict, bounded external-event validation
 - UTC normalization, server event identity, and deterministic event classification
 - Canonical sorted UTF-8 serialization with an 8 KiB internal ceiling
+- Provider-neutral advisory analysis interface with one isolated OpenAI adapter
+- Bounded, server-owned prompt policy and strict structured AI output
+- Stable provider failure categories with a 1–60 second timeout range and no retries
 - 16 KiB request-body ceiling enforced before framework body parsing
 - Safe JSON request-completion logs and server-generated correlation IDs
 - Sanitized, stable API errors and defensive response headers
@@ -72,6 +77,16 @@ Successful validation returns HTTP 202 with:
 
 The payload is not stored, logged, forwarded, interpreted, or executed.
 
+### `POST /api/v1/events/analyze`
+
+Accepts the same strict external event, normalizes it internally, and returns only an advisory
+result containing the authoritative event ID, category, closed priority/urgency/intent enums,
+bounded confidence, summary and reasons, and a closed recommended-next-step enum. It does not
+return the prompt, raw provider response, payload, internal metadata, model, or configuration.
+
+The endpoint requires configured provider credentials. Without them it fails deterministically
+with `AI_CONFIGURATION` and makes no network call.
+
 ## Event normalization and classification
 
 Supported event types are `CUSTOMER_REQUEST`, `CUSTOMER_MESSAGE`, `CUSTOMER_CREATED`,
@@ -90,6 +105,24 @@ deterministic canonical representation.
 
 An optional 1–128 character external event reference is available for future durable idempotency.
 It is not authoritative, and no in-memory or durable deduplication store exists.
+
+## AI architecture and configuration
+
+`BusinessIntelligenceService` depends only on the `AIAnalysisProvider` protocol. The official
+OpenAI SDK is imported solely by the OpenAI provider adapter. Production requires the secret
+`APP_OPENAI_API_KEY`; the server-owned model defaults to `gpt-5-mini` and may be configured with
+`APP_OPENAI_MODEL`. The key must come from a deployment secret manager and is never returned or
+logged. Timeout, maximum AI input bytes, and maximum output tokens are bounded `APP_` settings.
+
+The server instruction says that payload content is untrusted data, not commands. The event is
+delimited, canonical, and bounded to 8 KiB including instructions. Provider output is limited to
+800 tokens by default and 4 KiB before strict Pydantic validation. Unknown fields, arbitrary URLs,
+credentials, code, shell commands, HTTP instructions, and non-enum recommendations are rejected.
+
+The OpenAI request uses structured output, disables storage, performs no application or SDK retry,
+and supplies no tool, function, web-search, code-interpreter, conversation, or arbitrary endpoint
+configuration. Prompt injection remains an adversarial risk; isolation, bounded input, structured
+output, and the complete absence of action/tool capabilities reduce its impact.
 
 ## Local setup
 
@@ -127,14 +160,14 @@ Coverage is required to remain at or above 95%.
 
 ## Current limitations
 
-Phase 2 intentionally has no authentication, database, queue, event persistence, outbound network
-access, AI provider, external integration, workflow engine, or autonomous action mechanism. An
-accepted response confirms normalization and classification only; it does not promise durable or
-idempotent processing. No action is executed.
+Phase 3 intentionally has no authentication, database, queue, event persistence, business
+integration, workflow engine, tool calling, AI memory, or autonomous action mechanism. The only
+outbound boundary is the fixed OpenAI provider adapter. Analysis is advisory and does not promise
+durable or idempotent processing. No action is executed.
 
 ## Roadmap
 
-Future phases may add authenticated tenancy, durable storage, auditable workflows, narrowly scoped
-integrations, and a separately governed AI boundary. Each capability must receive its own threat
-model, authorization policy, data-handling rules, failure design, and security tests before it is
-enabled.
+Future phases may add authenticated tenancy, durable storage, auditable workflows, and narrowly
+scoped integrations. Each capability must receive its own threat model, authorization policy,
+data-handling rules, failure design, and security tests before it is enabled. AI analysis remains
+separately governed from every future action boundary.

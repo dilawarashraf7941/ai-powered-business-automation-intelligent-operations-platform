@@ -1,0 +1,60 @@
+"""FastAPI application factory and ASGI entrypoint."""
+
+from fastapi import FastAPI, Request, Response
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException
+
+from ai_business_automation.api.errors import (
+    http_error_handler,
+    unexpected_error_handler,
+    validation_error_handler,
+)
+from ai_business_automation.api.routes import router
+from ai_business_automation.config import Settings, get_settings
+from ai_business_automation.logging import configure_logging
+from ai_business_automation.security.middleware import (
+    RequestBodyLimitMiddleware,
+    RequestContextMiddleware,
+    SafeExceptionMiddleware,
+)
+
+
+async def _validation_error_adapter(request: Request, exc: Exception) -> Response:
+    """Bridge Starlette's broad handler type to FastAPI's validation exception."""
+
+    if not isinstance(exc, RequestValidationError):
+        return await unexpected_error_handler(request, exc)
+    return await validation_error_handler(request, exc)
+
+
+async def _http_error_adapter(request: Request, exc: Exception) -> Response:
+    """Bridge Starlette's broad handler type to its HTTP exception."""
+
+    if not isinstance(exc, HTTPException):
+        return await unexpected_error_handler(request, exc)
+    return await http_error_handler(request, exc)
+
+
+def create_app(settings: Settings | None = None) -> FastAPI:
+    """Build an application using validated, server-owned settings."""
+
+    active_settings = settings or get_settings()
+    configure_logging(active_settings.log_level)
+    application = FastAPI(
+        title="AI Business Automation Platform",
+        version="0.1.0",
+        debug=False,
+    )
+    application.add_exception_handler(RequestValidationError, _validation_error_adapter)
+    application.add_exception_handler(HTTPException, _http_error_adapter)
+    application.add_exception_handler(Exception, unexpected_error_handler)
+    application.include_router(router)
+    application.add_middleware(SafeExceptionMiddleware)
+    application.add_middleware(
+        RequestBodyLimitMiddleware, max_bytes=active_settings.max_request_body_bytes
+    )
+    application.add_middleware(RequestContextMiddleware)
+    return application
+
+
+app = create_app()

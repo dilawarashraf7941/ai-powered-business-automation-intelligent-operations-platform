@@ -111,6 +111,17 @@ class SafeExceptionMiddleware:
             if scope["type"] != "http":
                 raise
             request_id = str(scope.get("state", {}).get("request_id", "unavailable"))
+            _LOGGER.info(
+                "event_rejected",
+                extra={
+                    "request_id": request_id,
+                    "operation": _operation_name(
+                        str(scope.get("method", "")), str(scope.get("path", ""))
+                    ),
+                    "error_category": "INTERNAL_ERROR",
+                    "outcome": "rejected",
+                },
+            )
             await _send_json_error(
                 send, 500, "INTERNAL_ERROR", "An internal error occurred.", request_id
             )

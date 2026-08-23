@@ -2,9 +2,11 @@
 
 ## Input validation
 
-The event envelope is a strict Pydantic model that forbids unknown top-level properties. Event type
-and source are 1–64 character identifiers restricted to lowercase letters, numbers, underscores,
-and hyphens. Payload validation applies these server-owned ceilings:
+The external event is a strict Pydantic model that forbids unknown properties. Event type and
+source are exact members of closed server-owned enums. The client cannot provide the category,
+authoritative event ID, receipt time, or internal metadata. An optional external reference is
+limited to 128 safe characters and never becomes authoritative. Payload validation applies these
+server-owned ceilings:
 
 | Limit | Value |
 | --- | ---: |
@@ -22,6 +24,14 @@ The validator rejects malformed field names, control characters, capability/cont
 credential-like keys, URL schemes, and common shell-command syntax. These checks reduce exposure;
 they are not a substitute for authorization in later phases.
 
+## Timestamp and canonicalization policy
+
+`occurred_at` must be a bounded ISO-8601 string with an explicit numeric offset. Naive, malformed,
+more-than-365-day-old, and more-than-five-minute-future values are rejected. Accepted times and the
+server-generated `received_at` are stored in UTC. Canonical JSON has sorted keys, deterministic enum
+and datetime rendering, UTF-8 encoding, and an 8 KiB output limit. Phase 2 creates no signatures,
+hashes, or provenance claims.
+
 ## Request size handling
 
 Pure ASGI middleware checks a valid `Content-Length` before reading and also counts streamed chunks.
@@ -31,7 +41,7 @@ FastAPI or Pydantic parses them. The setting is bounded from 1 KiB to 1 MiB; the
 ## Configuration and secrets
 
 Settings use `pydantic-settings`, require the `APP_` prefix, and validate environment, log level, and
-body limit. Phase 1 defines no credential settings because it has no providers. `.env` is ignored
+body limit. Phase 2 defines no credential settings because it has no providers. `.env` is ignored
 and must not be tracked. Settings are never returned from an endpoint or written to logs.
 
 ## Logging restrictions
@@ -41,6 +51,10 @@ server-generated request ID, allowlisted operation name, outcome, and status cla
 request or response bodies, raw paths or query strings, full URLs, client identity values, headers,
 cookies, exception traces, or event contents. A recursive key-based redactor is included for future
 structured records, while the formatter itself uses an allowlist.
+
+Accepted-event records add only event ID, event type, source, category, request ID, and outcome.
+Rejected-event records add only a stable error category and bounded operational fields. Payloads,
+customer messages, email addresses, phone numbers, URLs, credentials, and metadata are excluded.
 
 ## Error handling
 
@@ -65,4 +79,4 @@ allowlist; wildcard CORS is not acceptable.
 Production code contains no dynamic evaluation, shell or subprocess access, arbitrary imports,
 outbound HTTP client, URL construction, persistence adapter, external integration, workflow runner,
 AI provider, or autonomous action facility. A focused AST-based security scan and tests guard these
-Phase 1 exclusions.
+Phase 2 exclusions. No event is persisted, deduplicated, queued, or processed in the background.

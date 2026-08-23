@@ -1,6 +1,7 @@
 """Shared API test fixtures."""
 
 from collections.abc import Iterator
+from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,7 +20,8 @@ def client() -> Iterator[TestClient]:
 @pytest.fixture
 def valid_event() -> dict[str, object]:
     return {
-        "event_type": "customer_request",
-        "source": "web_form",
+        "event_type": "CUSTOMER_REQUEST",
+        "source": "WEB_FORM",
+        "occurred_at": datetime.now(UTC).isoformat(),
         "payload": {"request_type": "demo"},
     }

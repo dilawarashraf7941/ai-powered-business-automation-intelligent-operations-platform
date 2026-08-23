@@ -16,7 +16,17 @@ _SENSITIVE_FRAGMENTS = (
     "apikey",
     "credential",
 )
-_ALLOWED_EXTRA = ("request_id", "operation", "outcome", "status_class")
+_ALLOWED_EXTRA = (
+    "request_id",
+    "operation",
+    "outcome",
+    "status_class",
+    "event_id",
+    "event_type",
+    "source",
+    "category",
+    "error_category",
+)
 
 
 def redact(value: Any) -> Any:

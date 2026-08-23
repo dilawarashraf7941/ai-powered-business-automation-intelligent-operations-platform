@@ -1,14 +1,21 @@
 """Versioned API and health routes."""
 
-from typing import Literal
+import logging
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Depends, Request, status
 from pydantic import BaseModel, ConfigDict
 
-from ai_business_automation.models.events import BusinessEvent, EventAcknowledgement
-from ai_business_automation.services.events import acknowledge_event
+from ai_business_automation.models.events import EventAcknowledgement, ExternalEvent
+from ai_business_automation.services.events import EventIngestionService
 
 router = APIRouter()
+_LOGGER = logging.getLogger("ai_business_automation.events")
+_INGESTION_SERVICE = EventIngestionService()
+
+
+def get_ingestion_service() -> EventIngestionService:
+    return _INGESTION_SERVICE
 
 
 class HealthResponse(BaseModel):
@@ -30,7 +37,23 @@ async def health() -> HealthResponse:
     status_code=status.HTTP_202_ACCEPTED,
     tags=["events"],
 )
-async def create_event(event: BusinessEvent) -> EventAcknowledgement:
-    """Validate and acknowledge an untrusted event without side effects."""
+async def create_event(
+    event: ExternalEvent,
+    request: Request,
+    service: Annotated[EventIngestionService, Depends(get_ingestion_service)],
+) -> EventAcknowledgement:
+    """Normalize, classify, and acknowledge an untrusted event without side effects."""
 
-    return acknowledge_event(event)
+    result = service.ingest(event)
+    _LOGGER.info(
+        "event_accepted",
+        extra={
+            "request_id": str(request.state.request_id),
+            "event_id": result.event.event_id,
+            "event_type": result.event.event_type.value,
+            "source": result.event.source.value,
+            "category": result.category.value,
+            "outcome": "accepted",
+        },
+    )
+    return result.acknowledgement()

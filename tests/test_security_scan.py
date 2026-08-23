@@ -1,4 +1,4 @@
-"""Source-level enforcement of Phase 1 capability exclusions."""
+"""Source-level enforcement of Phase 2 capability exclusions."""
 
 import ast
 import re
@@ -10,8 +10,8 @@ SOURCE = ROOT / "src"
 
 
 def test_production_source_has_no_dangerous_capabilities() -> None:
-    forbidden_imports = {"subprocess", "requests", "httpx", "urllib.request"}
-    forbidden_calls = {"eval", "exec", "compile", "os.system"}
+    forbidden_imports = {"subprocess", "requests", "httpx", "urllib", "importlib"}
+    forbidden_calls = {"eval", "exec", "compile", "__import__", "os.system"}
     findings: list[str] = []
     for path in SOURCE.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -20,9 +20,12 @@ def test_production_source_has_no_dangerous_capabilities() -> None:
                 findings.extend(
                     f"{path}: import {alias.name}"
                     for alias in node.names
-                    if alias.name in forbidden_imports
+                    if alias.name.split(".")[0] in forbidden_imports
                 )
-            elif isinstance(node, ast.ImportFrom) and node.module in forbidden_imports:
+            elif (
+                isinstance(node, ast.ImportFrom)
+                and (node.module or "").split(".")[0] in forbidden_imports
+            ):
                 findings.append(f"{path}: import {node.module}")
             elif isinstance(node, ast.Call):
                 name = _call_name(node.func)

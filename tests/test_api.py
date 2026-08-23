@@ -32,7 +32,12 @@ def test_valid_event_is_only_acknowledged(
 ) -> None:
     response = client.post("/api/v1/events", json=valid_event)
     assert response.status_code == 202
-    assert response.json() == {"accepted": True, "event_type": "customer_request"}
+    acknowledgement = response.json()
+    assert acknowledgement["accepted"] is True
+    assert acknowledgement["event_type"] == "CUSTOMER_REQUEST"
+    assert acknowledgement["category"] == "CUSTOMER"
+    assert acknowledgement["event_id"].startswith("evt_")
+    assert acknowledgement["received_at"].endswith("Z")
     assert "payload" not in response.text
 
 
@@ -51,7 +56,11 @@ def test_invalid_top_level_event_values_are_rejected(
 ) -> None:
     response = client.post("/api/v1/events", json={**valid_event, **update})
     assert response.status_code == 422
-    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert response.json()["error"]["code"] in {
+        "INVALID_EVENT",
+        "UNSUPPORTED_EVENT_TYPE",
+        "UNSUPPORTED_SOURCE",
+    }
 
 
 @pytest.mark.parametrize(
@@ -127,7 +136,7 @@ def test_malformed_json_returns_safe_error(client: TestClient) -> None:
         "/api/v1/events", content=b'{"event_type":', headers={"content-type": "application/json"}
     )
     assert response.status_code == 422
-    assert response.json()["error"]["message"] == "Request validation failed."
+    assert response.json()["error"]["message"] == "Event validation failed."
 
 
 def test_declared_oversized_body_is_rejected(client: TestClient) -> None:

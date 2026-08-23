@@ -1,6 +1,8 @@
 # Architecture
 
-## Phase 1 shape
+Phase 2 normalizes and classifies events only. No action is executed.
+
+## Phase 2 shape
 
 The project uses a compact `src` layout with responsibilities split by boundary:
 
@@ -8,15 +10,15 @@ The project uses a compact `src` layout with responsibilities split by boundary:
 | --- | --- |
 | `main.py` | Application construction and explicit middleware/handler registration |
 | `api/` | HTTP routes and stable public error contracts |
-| `models/` | Strict event schemas and recursive validation limits |
-| `services/` | Side-effect-free event acknowledgement |
+| `models/` | Closed taxonomies, strict external input, and canonical internal events |
+| `services/` | Side-effect-free normalization, canonicalization, and classification |
 | `config/` | Validated server-owned settings |
 | `logging/` | Allowlisted JSON log serialization and reusable redaction |
 | `security/` | Request-size enforcement, correlation IDs, and response headers |
 
 ## API boundary
 
-HTTP is the only application boundary in Phase 1. Middleware first assigns a cryptographically
+HTTP is the only application boundary in Phase 2. Middleware first assigns a cryptographically
 random request ID and then reads at most the configured request-body ceiling. FastAPI parses only a
 body that has already passed this limit. Pydantic then validates the event envelope and recursively
 checks its payload. Routes receive validated models rather than raw dictionaries.
@@ -31,8 +33,21 @@ limits on serialized bytes, nesting depth, fields, fields per object, array item
 field-name syntax, string length, and numeric range. Capability-bearing keys and URL-, credential-,
 or command-like content are rejected.
 
-After validation, the service derives only the event type for the acknowledgement. There are no
-repositories, queues, outbound clients, dynamic dispatchers, or interpreters.
+## Normalization and classification
+
+The API passes a validated `ExternalEvent` to `EventIngestionService`. `EventNormalizer` converts
+the timestamp to UTC, enforces a 365-day past and five-minute future skew window, creates a random
+authoritative event ID and server receipt time, deep-copies the payload, and builds fixed internal
+metadata. The client may provide only a bounded external reference, never internal metadata.
+
+The resulting `CanonicalBusinessEvent` has deterministic enum and UTC datetime representations.
+Canonical JSON uses sorted keys, compact separators, UTF-8, and an 8 KiB ceiling. It is not signed
+or hashed in Phase 2. `EventClassifier` then maps the closed event enum to the closed `CUSTOMER`,
+`COMMERCE`, `SUPPORT`, `INTERNAL`, or `SYSTEM` category enum.
+
+The response exposes only acknowledgement fields. There are no repositories, queues, outbound
+clients, dynamic dispatchers, background workers, interpreters, or in-memory deduplication stores.
+Durable event storage, idempotency, provenance, and processing remain future boundaries.
 
 ## Future AI boundary
 

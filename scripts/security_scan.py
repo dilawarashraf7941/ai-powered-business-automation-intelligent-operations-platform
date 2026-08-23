@@ -7,7 +7,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "src"
-FORBIDDEN_CALLS = {"eval", "exec", "compile", "os.system"}
+FORBIDDEN_CALLS = {"eval", "exec", "compile", "__import__", "os.system"}
+FORBIDDEN_IMPORTS = {"subprocess", "requests", "httpx", "urllib", "importlib"}
 SECRET_PATTERN = re.compile(
     r"(?i)(api[_-]?key|password|secret|token)\s*=\s*['\"][A-Za-z0-9_\-/+=]{16,}['\"]"
 )
@@ -20,9 +21,13 @@ def scan_file(path: Path) -> list[str]:
     text = path.read_text(encoding="utf-8")
     tree = ast.parse(text, filename=str(path))
     for node in ast.walk(tree):
-        if isinstance(node, ast.Import | ast.ImportFrom):
-            names = [alias.name for alias in node.names]
-            if any(name == "subprocess" or name.startswith("requests") for name in names):
+        if isinstance(node, ast.Import) and any(
+            alias.name.split(".")[0] in FORBIDDEN_IMPORTS for alias in node.names
+        ):
+            findings.append(f"{path}: prohibited capability import")
+        if isinstance(node, ast.ImportFrom):
+            module_root = (node.module or "").split(".")[0]
+            if module_root in FORBIDDEN_IMPORTS:
                 findings.append(f"{path}: prohibited capability import")
         if isinstance(node, ast.Call):
             name = _call_name(node.func)

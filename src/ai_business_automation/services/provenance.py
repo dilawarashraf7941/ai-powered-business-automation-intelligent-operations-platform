@@ -8,7 +8,9 @@ from ai_business_automation.models import (
     AuditEventType,
     BusinessIntelligenceResult,
     CanonicalBusinessEvent,
+    GHLAddContactTagParameters,
     PolicyDecision,
+    RecommendedAction,
     TrustedProvenance,
 )
 from ai_business_automation.models.approvals import ActorId, ApprovalId, AuditEventId, Sha256Hex
@@ -37,6 +39,11 @@ def build_trusted_provenance(
     """Bind policy fields to digests of full canonical validated inputs."""
 
     intelligence_bytes = canonical_json_bytes(intelligence.model_dump(mode="json"))
+    action_parameters = (
+        GHLAddContactTagParameters.model_validate(event.payload)
+        if decision.action is RecommendedAction.ADD_CONTACT_TAG
+        else None
+    )
     return TrustedProvenance(
         event_id=event.event_id,
         event_type=event.event_type,
@@ -49,6 +56,7 @@ def build_trusted_provenance(
         evidence=decision.evidence,
         canonical_event_sha256=sha256_hex(canonical_event_bytes(event)),
         canonical_intelligence_sha256=sha256_hex(intelligence_bytes),
+        action_parameters=action_parameters,
     )
 
 
@@ -64,22 +72,29 @@ def audit_event_hash(
     *,
     audit_event_id: AuditEventId,
     approval_id: ApprovalId,
+    execution_id: str | None = None,
+    event_id: str | None = None,
+    failure_category: str | None = None,
     sequence_number: int,
     event_type: AuditEventType,
-    status: ApprovalStatus,
+    status: ApprovalStatus | str,
     actor_id: ActorId,
     occurred_at: str,
     previous_event_hash: Sha256Hex,
 ) -> str:
+    status_value = status.value if isinstance(status, ApprovalStatus) else status
     current = canonical_json_bytes(
         {
             "actor_id": actor_id,
             "approval_id": approval_id,
             "audit_event_id": audit_event_id,
             "event_type": event_type.value,
+            "event_id": event_id,
+            "execution_id": execution_id,
+            "failure_category": failure_category,
             "occurred_at": occurred_at,
             "sequence_number": sequence_number,
-            "status": status.value,
+            "status": status_value,
         }
     )
     return sha256_hex(current + previous_event_hash.encode("ascii"))

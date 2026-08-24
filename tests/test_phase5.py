@@ -488,9 +488,16 @@ def test_database_primary_key_prevents_duplicate_audit_identity(
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(
                 """
-                INSERT INTO approval_audit_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO approval_audit_events (
+                    audit_event_id, approval_id, sequence_number, event_type,
+                    execution_id, event_id, failure_category, status, actor_id, occurred_at,
+                    previous_event_hash, event_hash
+                ) SELECT audit_event_id, approval_id, sequence_number, event_type,
+                    execution_id, event_id, failure_category, status, actor_id, occurred_at,
+                    previous_event_hash, event_hash
+                  FROM approval_audit_events WHERE audit_event_id = ?
                 """,
-                tuple(row),
+                (row[0],),
             )
     finally:
         connection.close()

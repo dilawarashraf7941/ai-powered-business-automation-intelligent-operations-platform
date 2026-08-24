@@ -11,6 +11,7 @@ from ai_business_automation.models import (
     BusinessIntelligenceResult,
     CanonicalBusinessEvent,
     DecisionOutcome,
+    EventType,
     EvidenceCode,
     EvidenceSource,
     Intent,
@@ -74,6 +75,19 @@ class DeterministicPolicyEngine:
             return self._deny(EvidenceCode.CATEGORY_MISMATCH, EvidenceSource.CANONICAL_EVENT)
         if not intelligence.reasons:
             return self._deny(EvidenceCode.MISSING_AI_EVIDENCE, EvidenceSource.AI_ANALYSIS)
+
+        if event.event_type is EventType.GHL_CONTACT_TAG_REQUEST:
+            return PolicyEvaluation(
+                decision=DecisionOutcome.REQUIRE_HUMAN_APPROVAL,
+                action=RecommendedAction.ADD_CONTACT_TAG,
+                risk=RiskLevel.MEDIUM,
+                evidence=(
+                    PolicyEvidence(
+                        code=EvidenceCode.EXTERNAL_MUTATION_REQUIRES_APPROVAL,
+                        source=EvidenceSource.CANONICAL_EVENT,
+                    ),
+                ),
+            )
 
         action = _action_for(intelligence.recommended_next_step)
         elevated_priority = intelligence.priority in {Priority.HIGH, Priority.CRITICAL}

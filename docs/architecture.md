@@ -1,8 +1,8 @@
 # Architecture
 
-Phase 5 adds trusted human approval recording after deterministic policy. No action is executed.
+Phase 6 extends trusted human approval with exactly one controlled external business mutation.
 
-## Phase 5 shape
+## Phase 6 shape
 
 The project uses a compact `src` layout with responsibilities split by boundary:
 
@@ -10,10 +10,10 @@ The project uses a compact `src` layout with responsibilities split by boundary:
 | --- | --- |
 | `main.py` | Application construction and explicit middleware/handler registration |
 | `api/` | HTTP routes and stable public error contracts |
-| `models/` | Strict events, intelligence, policy results, and closed taxonomies |
-| `services/` | Normalization, advisory analysis, and pure deterministic policy |
-| `providers/` | Provider protocol, stable failures, and isolated OpenAI adapter |
-| `repositories/` | Provider-neutral approval contract and transactional SQLite adapter |
+| `models/` | Strict events, intelligence, policy, approval, execution, and action schemas |
+| `services/` | Advisory analysis, policy, approval, and fixed allowlisted action handlers |
+| `providers/` | Isolated OpenAI analysis and single-operation GHL adapters |
+| `repositories/` | Provider-neutral approval/execution contracts and transactional SQLite adapters |
 | `config/` | Validated server-owned settings |
 | `logging/` | Allowlisted JSON log serialization and reusable redaction |
 | `security/` | Request-size enforcement, correlation IDs, and response headers |
@@ -88,8 +88,8 @@ priority, high urgency, unknown intent, and `CONTACT_HUMAN`, `REQUEST_INFORMATIO
 `SCHEDULE_CONSULTATION`, or `NURTURE` require human approval. Clean `NONE` and low-risk `REVIEW`
 produce `ALLOW`. `ESCALATE` and high signals elevate risk deterministically.
 
-`ALLOW` is a policy result, not an execution command. Action execution, workflow, integration, and
-automation layers remain absent; Phase 5 adds only bounded human-approval persistence.
+`ALLOW` is a policy result, not an execution command. Execution requires a persisted human approval
+where policy required one; workflow engines and non-allowlisted integrations remain absent.
 
 ## Human approval boundary
 
@@ -115,7 +115,48 @@ Each creation, transition, expiry, and rejected transition appends an audit even
 previous hash, event hash, unique audit ID, stored count, and stored head are verified together by
 an internal service before authorization.
 
-**AI recommends. Policy decides. Human approves. Execution is a separate future boundary.**
+## Controlled execution boundary
+
+The execution API accepts a strict approval ID, contact ID, and single tag. `SQLiteExecutionRepository.claim` starts
+`BEGIN IMMEDIATE`, verifies the full approval provenance and audit chain, requires `APPROVED` before
+the server-owned expiry, requires `ADD_CONTACT_TAG`, verifies inputs against approval provenance,
+rejects any prior execution, writes `PENDING`, and conditionally changes it to `CLAIMED`. A unique
+`approval_id` constraint and affected-row check make claiming single-use under concurrent requests.
+
+`ContactTagExecutor` is the only action executor and delegates only to the dedicated provider method.
+No API value can select a handler,
+callable, module, plugin, URL, provider, method, headers, body, command, timeout, or retry policy.
+
+The lifecycle is `PENDING → CLAIMED → SUCCEEDED | FAILED | UNKNOWN`. `FAILED` is definitive
+non-completion; `UNKNOWN` means completion cannot
+be established. Neither state retries automatically, and every terminal state is final. The current
+phase has no background worker or replay mechanism.
+
+Execution events reuse the approval audit chain and canonical SHA-256 event hashing. The existing
+approval row count/head commitment covers `EXECUTION_AUTHORIZED`, `EXECUTION_CLAIMED`,
+`EXECUTION_SUCCEEDED`, `EXECUTION_FAILED`, and `EXECUTION_UNKNOWN`. Execution rows carry
+deterministic SHA-256 integrity commitments.
+
+## Controlled GHL provider boundary
+
+The only external action is `ADD_CONTACT_TAG`. Deterministic policy derives it solely from a
+validated internal `GHL_CONTACT_TAG_REQUEST`; AI has no GHL action in its recommendation taxonomy.
+Approval provenance contains a canonical commitment to the action, contact ID, one tag, event
+and intelligence digests, policy version, decision, risk, and evidence. Execution reconstructs the
+typed parameters from that trusted record and accepts no execution-time substitution.
+
+The dedicated adapter exposes only `add_contact_tag`, uses the fixed origin
+`https://services.leadconnectorhq.com`, constructs `POST /contacts/{contactId}/tags`, supplies
+server-owned bearer authentication and `Version: v3`, and creates exactly `{tags: [...]}`. `httpx`
+is confined to this adapter. There is no configurable origin, arbitrary endpoint, generic request
+method, arbitrary header/body capability, provider selector, or automatic retry.
+
+Documented definitive HTTP failures produce `FAILED`; timeout and post-transmission ambiguity
+produce `UNKNOWN`. Both are terminal locally. `UNKNOWN` requires manual reconciliation because no
+unsupported idempotency mechanism is invented. Audit events reuse the execution lifecycle and bind
+only the closed failure category—not credentials, targets, tags, or provider bodies.
+
+**AI recommends. Policy decides. Human approves. Executor performs only the approved allowlisted operation.**
 
 ## Future AI evolution
 
@@ -123,9 +164,9 @@ The AI boundary remains analysis-only. Any future expansion requires separate bu
 model allowlists, audit policy, authorization, and threat modeling. Untrusted event data and model
 output must never gain authority merely because a model processed or generated them.
 
-## Future workflow boundary
+## Future integration constraints
 
-No workflow engine or action runner exists. A future workflow boundary must separate proposals from
-authorized actions and use server-owned workflow identifiers, typed parameters, tenant-aware
-authorization, idempotency, approval gates, and immutable audit records. Neither event fields nor AI
-output may select arbitrary tools or destinations.
+The sole GHL contact-tag adapter does not generalize into a workflow framework. Any future
+integration would require a separately reviewed provider-owned schema, authorization policy,
+reconciliation design, and delivery guarantees. Neither event fields nor AI output may select
+arbitrary tools or destinations.

@@ -15,6 +15,7 @@ from pydantic import (
     model_validator,
 )
 
+from ai_business_automation.models.ghl import GHLAddContactTagParameters
 from ai_business_automation.models.policy import (
     DecisionOutcome,
     PolicyEvidence,
@@ -50,6 +51,11 @@ class AuditEventType(StrEnum):
     APPROVAL_REJECTED = "APPROVAL_REJECTED"
     APPROVAL_EXPIRED = "APPROVAL_EXPIRED"
     APPROVAL_TRANSITION_REJECTED = "APPROVAL_TRANSITION_REJECTED"
+    EXECUTION_AUTHORIZED = "EXECUTION_AUTHORIZED"
+    EXECUTION_CLAIMED = "EXECUTION_CLAIMED"
+    EXECUTION_SUCCEEDED = "EXECUTION_SUCCEEDED"
+    EXECUTION_FAILED = "EXECUTION_FAILED"
+    EXECUTION_UNKNOWN = "EXECUTION_UNKNOWN"
 
 
 type ApprovalId = Annotated[
@@ -99,6 +105,14 @@ class TrustedProvenance(BaseModel):
     evidence: list[PolicyEvidence] = Field(min_length=1, max_length=MAX_APPROVAL_EVIDENCE)
     canonical_event_sha256: Sha256Hex
     canonical_intelligence_sha256: Sha256Hex
+    action_parameters: GHLAddContactTagParameters | None = None
+
+    @model_validator(mode="after")
+    def validate_action_parameters(self) -> "TrustedProvenance":
+        requires_parameters = self.action is RecommendedAction.ADD_CONTACT_TAG
+        if requires_parameters != (self.action_parameters is not None):
+            raise ValueError("trusted action parameters do not match the approved action")
+        return self
 
 
 class ApprovalRecord(BaseModel):
@@ -123,6 +137,7 @@ class ApprovalRecord(BaseModel):
     approver_id: ActorId | None = None
     rejection_reason: RejectionReason | None = None
     provenance_hash: Sha256Hex
+    action_parameters: GHLAddContactTagParameters | None = None
 
     @field_validator("rejection_reason")
     @classmethod
@@ -151,6 +166,9 @@ class ApprovalRecord(BaseModel):
                 raise ValueError("rejected record is missing decision metadata")
         elif self.decided_at is None or self.approver_id is not None:
             raise ValueError("expired record has invalid terminal metadata")
+        requires_parameters = self.action is RecommendedAction.ADD_CONTACT_TAG
+        if requires_parameters != (self.action_parameters is not None):
+            raise ValueError("approval action parameters do not match the action")
         return self
 
     def public(self) -> "ApprovalResponse":
@@ -196,9 +214,16 @@ class AuditEvent(BaseModel):
 
     audit_event_id: AuditEventId
     approval_id: ApprovalId
+    execution_id: str | None = Field(
+        default=None, min_length=24, max_length=40, pattern=r"^exe_[A-Za-z0-9_-]+$"
+    )
+    event_id: EventId | None = None
+    failure_category: str | None = Field(default=None, min_length=1, max_length=64)
     sequence_number: int = Field(ge=1, le=1_000_000)
     event_type: AuditEventType
-    status: ApprovalStatus
+    status: str = Field(
+        pattern=r"^(?:PENDING|APPROVED|REJECTED|EXPIRED|CLAIMED|SUCCEEDED|FAILED|UNKNOWN)$"
+    )
     actor_id: ActorId
     occurred_at: AwareDatetime
     previous_event_hash: Sha256Hex

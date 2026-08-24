@@ -34,6 +34,8 @@ _ALLOWED_EXTRA = (
     "policy_version",
     "approval_id",
     "status",
+    "execution_id",
+    "result_code",
 )
 
 

@@ -70,6 +70,7 @@ class ApprovalService:
             created_at=now,
             expires_at=now + timedelta(seconds=self.ttl_seconds),
             provenance_hash=provenance_hash(provenance),
+            action_parameters=provenance.action_parameters,
         )
         stored = self.repository.create(record, provenance, now)
         self._log("approval_created", stored, "created")

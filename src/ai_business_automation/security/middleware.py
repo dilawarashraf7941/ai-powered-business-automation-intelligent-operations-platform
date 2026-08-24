@@ -187,4 +187,8 @@ def _operation_name(method: str, path: str) -> str:
             return "approve_approval"
         if method == "POST" and path.endswith("/reject"):
             return "reject_approval"
+    if path == "/api/v1/actions/contact-tag" and method == "POST":
+        return "execute_action"
+    if path.startswith("/api/v1/actions/executions/") and method == "GET":
+        return "read_execution"
     return "unmatched_route"

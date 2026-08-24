@@ -19,6 +19,19 @@ from ai_business_automation.models.events import (
     ExternalEvent,
     InternalEventMetadata,
 )
+from ai_business_automation.models.executions import (
+    ContactTagExecutionRequest,
+    ExecutionAction,
+    ExecutionFailureCategory,
+    ExecutionRecord,
+    ExecutionResponse,
+    ExecutionStatus,
+)
+from ai_business_automation.models.ghl import (
+    MAX_GHL_TAG_LENGTH,
+    GHLAddContactTagParameters,
+    GHLAddTagsRequest,
+)
 from ai_business_automation.models.intelligence import (
     MAX_AI_OUTPUT_BYTES,
     BusinessIntelligenceResult,
@@ -47,6 +60,7 @@ __all__ = [
     "GENESIS_AUDIT_HASH",
     "MAX_AI_OUTPUT_BYTES",
     "MAX_APPROVAL_EVIDENCE",
+    "MAX_GHL_TAG_LENGTH",
     "MAX_POLICY_EVIDENCE",
     "MAX_REJECTION_REASON_LENGTH",
     "POLICY_VERSION",
@@ -57,6 +71,7 @@ __all__ = [
     "AuditEventType",
     "BusinessIntelligenceResult",
     "CanonicalBusinessEvent",
+    "ContactTagExecutionRequest",
     "DecisionOutcome",
     "EmptyApprovalTransitionRequest",
     "EventAcknowledgement",
@@ -65,7 +80,14 @@ __all__ = [
     "EventType",
     "EvidenceCode",
     "EvidenceSource",
+    "ExecutionAction",
+    "ExecutionFailureCategory",
+    "ExecutionRecord",
+    "ExecutionResponse",
+    "ExecutionStatus",
     "ExternalEvent",
+    "GHLAddContactTagParameters",
+    "GHLAddTagsRequest",
     "Intent",
     "InternalEventMetadata",
     "PolicyDecision",

@@ -9,7 +9,9 @@ from pydantic import BaseModel, ConfigDict
 from ai_business_automation.models import (
     ApprovalResponse,
     BusinessIntelligenceResult,
+    ContactTagExecutionRequest,
     EmptyApprovalTransitionRequest,
+    ExecutionResponse,
     PolicyDecision,
     RejectionRequest,
 )
@@ -19,6 +21,10 @@ from ai_business_automation.services.approval_factory import (
 )
 from ai_business_automation.services.approvals import ApprovalService
 from ai_business_automation.services.events import EventIngestionService
+from ai_business_automation.services.execution_factory import (
+    get_execution_service as _get_execution_service,
+)
+from ai_business_automation.services.executions import ExecutionService
 from ai_business_automation.services.intelligence import BusinessIntelligenceService
 from ai_business_automation.services.intelligence_factory import (
     get_intelligence_service as _get_intelligence_service,
@@ -47,6 +53,10 @@ def get_policy_service() -> PolicyDecisionService:
 
 def get_approval_service() -> ApprovalService:
     return _get_approval_service()
+
+
+def get_execution_service() -> ExecutionService:
+    return _get_execution_service()
 
 
 class HealthResponse(BaseModel):
@@ -228,6 +238,36 @@ def _log_approval_response(request: Request, result: ApprovalResponse, event_nam
             "action": result.action.value,
             "risk": result.risk.value,
             "policy_version": result.policy_version,
+            "outcome": "success",
+        },
+    )
+
+
+@router.post(
+    "/api/v1/actions/contact-tag",
+    response_model=ExecutionResponse,
+    tags=["actions"],
+)
+async def execute_action(
+    execution_request: ContactTagExecutionRequest,
+    request: Request,
+    executions: Annotated[ExecutionService, Depends(get_execution_service)],
+) -> ExecutionResponse:
+    """Execute the one fixed contact-tag action bound to an approved record."""
+
+    result = executions.execute(execution_request).public()
+    _log_execution_response(request, result, "execution_completed")
+    return result
+
+
+def _log_execution_response(request: Request, result: ExecutionResponse, event_name: str) -> None:
+    _LOGGER.info(
+        event_name,
+        extra={
+            "request_id": str(request.state.request_id),
+            "execution_id": result.execution_id,
+            "action": result.action.value,
+            "status": result.status.value,
             "outcome": "success",
         },
     )

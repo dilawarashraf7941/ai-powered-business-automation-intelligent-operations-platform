@@ -80,11 +80,11 @@ allowlist; wildcard CORS is not acceptable.
 ## Excluded dangerous capabilities
 
 Production code contains no dynamic evaluation, shell or subprocess access, arbitrary imports,
-generic HTTP client, client-controlled URL construction, external business integration, workflow
-runner, or autonomous action facility. Persistence is confined to the approval repository and
-contains no event content. The isolated OpenAI adapter is the only outbound provider boundary. A
-focused AST-based security scan and tests guard these Phase 5 exclusions. No event is persisted,
-deduplicated, queued, or processed in the background.
+generic HTTP client, client-controlled URL construction, workflow runner, or autonomous action
+selection. Persistence is confined to approval and execution repositories and contains no event
+content. The isolated OpenAI and single-operation GHL adapters are the only outbound provider
+boundaries. A focused AST-based security scan verifies HTTP isolation. No event is deduplicated,
+queued, or processed in the background.
 
 ## AI input and prompt-injection controls
 
@@ -116,7 +116,7 @@ AI logs contain only allowlisted event ID/type, provider name, outcome, stable f
 bounded latency. Events, customer text, prompts, responses, credentials, headers, and PII are never
 logged. The official OpenAI SDK exists only in the provider adapter. Requests include no tools,
 functions, web search, code interpreter, conversation state, or arbitrary URL. AI is advisory only
-and cannot execute actions, call GHL or n8n, invoke workflows, or modify business state.
+and cannot execute actions, call a provider or n8n, invoke workflows, or modify business state.
 
 ## Policy trust boundary
 
@@ -148,7 +148,7 @@ Policy logs contain only allowlisted request/event identifiers, decision, action
 version, event type, and outcome. They exclude events, payloads, customer text, AI content, headers,
 credentials, and secrets.
 
-**AI recommends. Policy decides. Human approves. Execution is a separate future boundary.**
+**AI recommends. Policy decides. Human approves. Executor performs only the approved allowlisted operation.**
 
 ## Approval persistence security
 
@@ -184,6 +184,48 @@ tamper evidence against accidental or unsophisticated modification; an attacker 
 database rows and recompute every hash is outside this phase's guarantees.
 
 `APP_APPROVER_ID` is a development/server-configured actor label, not authenticated identity. Phase
-5 has no login, session, identity provider, authorization system, approval UI, or execution token.
-`APPROVED` records state only that the configured development actor approved the recommendation;
-they execute nothing.
+6 has no login, session, identity provider, authorization system, or approval UI. Approval alone
+does not perform an action; the separate execution service must validate and atomically claim it.
+
+## Controlled execution security
+
+The execution request contains only a strict `approval_id`, bounded `contact_id`, and one bounded
+`tag`. It structurally rejects client execution IDs, actions, URLs, methods, headers, bodies, credentials, commands,
+modules, callables, plugins, providers, timeouts, retry policies, and actor identities. The server
+requires the inputs to equal trusted approval provenance and generates a random
+non-sequential execution ID.
+
+Before claim, the repository verifies approval existence, `APPROVED` state, server TTL, audit chain,
+provenance hash, policy version, decision, action, risk, confidence, evidence, and event identity.
+Failure invokes no provider.
+`BEGIN IMMEDIATE`, a unique execution-per-approval constraint, and a conditional `PENDING` claim
+prevent replay and concurrent double execution.
+
+There is no action registry, registration API, or dynamic loading. The only executor can invoke
+only the dedicated GHL `add_contact_tag` provider method. Policy, approval, authorization,
+models, routes, and the executor import no HTTP client, socket, subprocess, shell, dynamic
+importer, provider SDK, or tool framework.
+
+`SUCCEEDED`, `FAILED`, and `UNKNOWN` are terminal. A definitive failure and an indeterminate outcome
+are both recorded without automatic retry; `UNKNOWN` requires a future reconciliation design.
+Execution results expose no actor configuration, effect content, payload, AI content, provider
+response, credential, SQL detail, or filesystem path. Logs allowlist execution/approval/event IDs,
+closed action/status/result codes, request ID, and safe outcome only.
+
+## GHL integration security
+
+`GHL_CONTACT_TAG_REQUEST` is internal-only and carries a strict bounded contact identifier and one
+safe tag. IDs reject URLs, slashes, query syntax, whitespace, and excessive length. The tag rejects
+URLs, credential-like content, controls, unknown fields, and excessive length.
+
+The API key is a server-owned `SecretStr`. It is not part of event, approval, provenance, execution,
+effect, audit, response, or log schemas. The adapter alone unwraps it to build `Authorization`; the
+fixed origin, path shape, version, timeout, headers, and strict `{tags}` body cannot be supplied by a
+client. Raw provider bodies and exception text never cross the adapter boundary.
+
+Failures use closed categories for provider authentication, rate limits, bad requests,
+unavailability, timeouts, provider errors, and unknown outcomes. Definitive provider responses
+become `FAILED`; ambiguous timeout or interrupted
+transmission becomes terminal `UNKNOWN`, with no retry. Manual reconciliation is required before
+any future action. There is no arbitrary URL or generic HTTP capability, no other GHL endpoint, no
+n8n integration, and no other CRM mutation.

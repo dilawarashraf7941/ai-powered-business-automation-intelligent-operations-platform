@@ -5,9 +5,10 @@ import math
 import re
 from datetime import UTC, datetime
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 
+from ai_business_automation.models.ghl import GHLAddContactTagParameters
 from ai_business_automation.models.taxonomy import EventCategory, EventSource, EventType
 
 type JsonScalar = str | int | float | bool | None
@@ -171,6 +172,14 @@ class ExternalEvent(BaseModel):
 
         return _validate_payload(value)
 
+    @model_validator(mode="after")
+    def validate_external_operation(self) -> "ExternalEvent":
+        if self.event_type is EventType.GHL_CONTACT_TAG_REQUEST:
+            if self.source is not EventSource.INTERNAL:
+                raise UnsafePayloadError("GHL mutation requests require the internal event source")
+            GHLAddContactTagParameters.model_validate(self.payload)
+        return self
+
 
 class InternalEventMetadata(BaseModel):
     """Server-shaped metadata; clients cannot provide this object."""
@@ -204,6 +213,14 @@ class CanonicalBusinessEvent(BaseModel):
     @classmethod
     def validate_internal_payload(cls, value: dict[str, JsonValue]) -> dict[str, JsonValue]:
         return _validate_payload(value)
+
+    @model_validator(mode="after")
+    def validate_external_operation(self) -> "CanonicalBusinessEvent":
+        if self.event_type is EventType.GHL_CONTACT_TAG_REQUEST:
+            if self.source is not EventSource.INTERNAL:
+                raise UnsafePayloadError("GHL mutation requests require the internal event source")
+            GHLAddContactTagParameters.model_validate(self.payload)
+        return self
 
 
 class EventAcknowledgement(BaseModel):

@@ -45,6 +45,7 @@ class ApprovalService:
         self,
         event: CanonicalBusinessEvent,
         intelligence: BusinessIntelligenceResult,
+        actor_id: str | None = None,
     ) -> ApprovalRecord:
         decision = self.policy_service.decide(event, intelligence)
         if (
@@ -72,7 +73,11 @@ class ApprovalService:
             provenance_hash=provenance_hash(provenance),
             action_parameters=provenance.action_parameters,
         )
-        stored = self.repository.create(record, provenance, now)
+        stored = (
+            self.repository.create(record, provenance, now, actor_id)
+            if actor_id is not None
+            else self.repository.create(record, provenance, now)
+        )
         self._log("approval_created", stored, "created")
         return stored
 
@@ -81,23 +86,23 @@ class ApprovalService:
         self._log("approval_read", record, "success")
         return record
 
-    def approve(self, approval_id: str) -> ApprovalRecord:
+    def approve(self, approval_id: str, actor_id: str | None = None) -> ApprovalRecord:
         record = self.repository.transition(
             approval_id,
             ApprovalStatus.APPROVED,
             _utc(self.clock()),
-            self.approver_id,
+            actor_id or self.approver_id,
         )
         self._log("approval_approved", record, "success")
         return record
 
-    def reject(self, approval_id: str, reason: str) -> ApprovalRecord:
+    def reject(self, approval_id: str, reason: str, actor_id: str | None = None) -> ApprovalRecord:
         validated_reason = RejectionRequest(reason=reason).reason
         record = self.repository.transition(
             approval_id,
             ApprovalStatus.REJECTED,
             _utc(self.clock()),
-            self.approver_id,
+            actor_id or self.approver_id,
             rejection_reason=validated_reason,
         )
         self._log("approval_rejected", record, "success")

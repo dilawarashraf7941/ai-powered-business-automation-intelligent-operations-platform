@@ -13,6 +13,11 @@ from ai_business_automation.models.approvals import (
     RejectionRequest,
     TrustedProvenance,
 )
+from ai_business_automation.models.auth import (
+    AuthenticatedActor,
+    AuthRole,
+    SecurityAuditEventType,
+)
 from ai_business_automation.models.events import (
     CanonicalBusinessEvent,
     EventAcknowledgement,
@@ -69,6 +74,8 @@ __all__ = [
     "ApprovalStatus",
     "AuditEvent",
     "AuditEventType",
+    "AuthRole",
+    "AuthenticatedActor",
     "BusinessIntelligenceResult",
     "CanonicalBusinessEvent",
     "ContactTagExecutionRequest",
@@ -98,6 +105,7 @@ __all__ = [
     "RecommendedNextStep",
     "RejectionRequest",
     "RiskLevel",
+    "SecurityAuditEventType",
     "TrustedProvenance",
     "Urgency",
 ]

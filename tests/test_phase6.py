@@ -15,7 +15,6 @@ from typing import Literal, cast
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 from pydantic import SecretStr, ValidationError
 
 from ai_business_automation.api.routes import get_execution_service
@@ -71,6 +70,7 @@ from ai_business_automation.services.execution_errors import (
 from ai_business_automation.services.executions import ExecutionService
 from ai_business_automation.services.normalization import EventNormalizer
 from ai_business_automation.services.policy import DeterministicPolicyEngine, PolicyDecisionService
+from tests.auth_helpers import auth_settings, authenticated_client
 
 NOW = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
 EVENT_ID = "evt_phase6_contact_tag"
@@ -584,9 +584,9 @@ def test_api_returns_only_safe_bounded_result(phase6_tmp_path: Path) -> None:
     _approvals, executions, _repository, approval_id = approved_boundary(
         phase6_tmp_path / "api.sqlite3", RecordingProvider()
     )
-    app = create_app(Settings(environment=Environment.TEST))
+    app = create_app(auth_settings(approval_database_path=str(phase6_tmp_path / "api.sqlite3")))
     app.dependency_overrides[get_execution_service] = lambda: executions
-    with TestClient(app) as client:
+    with authenticated_client(app) as client:
         response = client.post(
             "/api/v1/actions/contact-tag",
             json={"approval_id": approval_id, "contact_id": CONTACT_ID, "tag": TAG},
@@ -752,9 +752,11 @@ def test_safe_api_error_for_unapproved_execution(phase6_tmp_path: Path) -> None:
         phase6_tmp_path / "api-pending.sqlite3", provider
     )
     pending = approvals.create(tag_event(), intelligence())
-    app = create_app(Settings(environment=Environment.TEST))
+    app = create_app(
+        auth_settings(approval_database_path=str(phase6_tmp_path / "api-pending.sqlite3"))
+    )
     app.dependency_overrides[get_execution_service] = lambda: executions
-    with TestClient(app) as client:
+    with authenticated_client(app) as client:
         response = client.post(
             "/api/v1/actions/contact-tag",
             json={

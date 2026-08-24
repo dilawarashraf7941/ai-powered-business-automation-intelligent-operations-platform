@@ -40,10 +40,12 @@ class ExecutionService:
     actor_id: str
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
 
-    def execute(self, request: ContactTagExecutionRequest) -> ExecutionRecord:
+    def execute(
+        self, request: ContactTagExecutionRequest, actor_id: str | None = None
+    ) -> ExecutionRecord:
         parameters = GHLAddContactTagParameters(contact_id=request.contact_id, tag=request.tag)
         claimed, _approval = self.repository.claim(
-            request.approval_id, parameters, _utc(self.clock()), self.actor_id
+            request.approval_id, parameters, _utc(self.clock()), actor_id or self.actor_id
         )
         self._log("execution_claimed", claimed)
         try:

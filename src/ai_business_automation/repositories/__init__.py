@@ -8,10 +8,12 @@ from ai_business_automation.repositories.executions import (
     ExecutionRepository,
     SQLiteExecutionRepository,
 )
+from ai_business_automation.repositories.security_audit import SecurityAuditRepository
 
 __all__ = [
     "ApprovalRepository",
     "ExecutionRepository",
     "SQLiteApprovalRepository",
     "SQLiteExecutionRepository",
+    "SecurityAuditRepository",
 ]

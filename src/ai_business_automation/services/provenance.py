@@ -31,6 +31,12 @@ def sha256_hex(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def chained_audit_hash(payload: object, previous_event_hash: str) -> str:
+    """Apply the shared hash-chain primitive to canonical audit data."""
+
+    return sha256_hex(canonical_json_bytes(payload) + previous_event_hash.encode("ascii"))
+
+
 def build_trusted_provenance(
     event: CanonicalBusinessEvent,
     intelligence: BusinessIntelligenceResult,
@@ -83,7 +89,7 @@ def audit_event_hash(
     previous_event_hash: Sha256Hex,
 ) -> str:
     status_value = status.value if isinstance(status, ApprovalStatus) else status
-    current = canonical_json_bytes(
+    return chained_audit_hash(
         {
             "actor_id": actor_id,
             "approval_id": approval_id,
@@ -95,6 +101,6 @@ def audit_event_hash(
             "occurred_at": occurred_at,
             "sequence_number": sequence_number,
             "status": status_value,
-        }
+        },
+        previous_event_hash,
     )
-    return sha256_hex(current + previous_event_hash.encode("ascii"))

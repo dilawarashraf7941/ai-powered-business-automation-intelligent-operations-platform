@@ -150,6 +150,9 @@ class RequestContextMiddleware:
                 headers = list(message.get("headers", []))
                 headers.append((b"x-request-id", request_id.encode("ascii")))
                 headers.append((b"x-content-type-options", b"nosniff"))
+                if _protected_path(str(scope.get("path", ""))):
+                    headers.append((b"cache-control", b"no-store"))
+                    headers.append((b"pragma", b"no-cache"))
                 message = {**message, "headers": headers}
             await send(message)
 
@@ -192,3 +195,7 @@ def _operation_name(method: str, path: str) -> str:
     if path.startswith("/api/v1/actions/executions/") and method == "GET":
         return "read_execution"
     return "unmatched_route"
+
+
+def _protected_path(path: str) -> bool:
+    return path.startswith(("/api/v1/approvals", "/api/v1/actions", "/api/v1/admin"))

@@ -290,3 +290,35 @@ This phase provides application-level bearer-token authentication only. It does 
 external identity provider, OAuth/OIDC, automated credential rotation, centralized identity
 management, distributed rate limiting, or SSO. Production deployments should place the service
 behind appropriate secret management and network access controls.
+
+## Production hardening
+
+Production configuration fails closed before traffic is served. At least one complete fixed
+authentication slot is required and authentication material must meet a stronger production length
+bound. Authentication, GHL, and OpenAI secrets reject bounded obvious placeholder patterns without
+echoing values. GHL and OpenAI keys are mandatory; GHL remains fixed to version `v3` and the single
+compiled origin, while the OpenAI model must be in the one-entry production allowlist. DEBUG/debug,
+development actor fallbacks, unsafe policy thresholds, implicit SQLite configuration, missing
+parents, traversal, and non-file database targets are rejected.
+
+Startup validates configuration and initializes or checks only the local fail-closed SQLite schema.
+It performs no provider call. Liveness performs no database work; readiness performs only bounded
+local SQLite connectivity and schema compatibility checks. Provider availability never controls
+readiness. CORS remains absent, response hardening remains active, and request/payload limits are
+unchanged.
+
+The container has no secret `ARG` or `ENV`, uses targeted source copies and a secret/database/cache
+denylist for its build context, and runs as fixed non-root UID/GID `10001:10001`. Its exec-form,
+single-worker process receives signals directly. The application has no background work and every
+SQLite connection is operation-scoped and closed in `finally` blocks.
+
+The release verifier uses local static checks only. It reviews required artifacts, exact runtime
+pins, environment/database artifacts, obvious private-key/API-key/password/bearer patterns,
+Docker hardening, CORS absence, the fixed GHL origin, production validation, and CI dependency audit
+presence. The separate dependency audit may access vulnerability/package indexes; neither verifier
+contacts GHL, OpenAI, or any application provider.
+
+SQLite, local rate limits, and local telemetry remain single-process/single-instance oriented and
+reset where applicable on restart. There are no distributed locks or scaling guarantees. External
+TLS, network filtering, monitoring, alerting, backups, secret management, and horizontal-scaling
+architecture remain deployment responsibilities.

@@ -4,13 +4,14 @@ import pytest
 from pydantic import SecretStr, ValidationError
 
 from ai_business_automation.config import Environment, Settings, get_settings
+from tests.production_helpers import production_values
 
 
 @pytest.mark.parametrize("environment", list(Environment))
 def test_supported_environments(environment: Environment) -> None:
     values: dict[str, object] = {"environment": environment}
     if environment is Environment.PRODUCTION:
-        values["openai_api_key"] = SecretStr("unit-test-placeholder")
+        values = production_values()
     assert Settings(**values).environment is environment  # type: ignore[arg-type]
 
 
@@ -31,11 +32,15 @@ def test_invalid_configuration_is_rejected(field: str, value: object) -> None:
 def test_settings_load_prefixed_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("APP_ENVIRONMENT", "production")
     monkeypatch.setenv("APP_LOG_LEVEL", "WARNING")
-    monkeypatch.setenv("APP_OPENAI_API_KEY", "unit-test-placeholder")
+    for field, value in production_values().items():
+        if field == "environment":
+            continue
+        rendered = value.get_secret_value() if isinstance(value, SecretStr) else str(value)
+        monkeypatch.setenv(f"APP_{field.upper()}", rendered)
     settings = Settings()
     assert settings.environment is Environment.PRODUCTION
     assert settings.log_level == "WARNING"
-    assert "unit-test-placeholder" not in repr(settings)
+    assert "local-ci-auth-material" not in repr(settings)
 
 
 def test_production_requires_provider_credentials() -> None:

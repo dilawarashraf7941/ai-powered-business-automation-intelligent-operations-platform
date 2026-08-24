@@ -3,7 +3,7 @@
 import logging
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Path, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Request, status
 from pydantic import BaseModel, ConfigDict
 
 from ai_business_automation.models import (
@@ -99,9 +99,13 @@ async def health() -> HealthResponse:
 
 
 @router.get("/ready", response_model=ReadinessResponse, tags=["health"])
-async def readiness() -> ReadinessResponse:
+async def readiness(request: Request) -> ReadinessResponse:
     """Return safe process readiness without exposing configuration."""
 
+    try:
+        request.app.state.readiness_probe()
+    except Exception as exc:
+        raise HTTPException(status_code=503) from exc
     return ReadinessResponse(status="ready")
 
 

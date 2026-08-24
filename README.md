@@ -1,6 +1,6 @@
 # AI-Powered Business Automation & Intelligent Operations Platform
 
-This repository contains the secure Phase 9 authenticated execution and authorization boundary for a business
+This repository contains the production-hardened Phase 10 deployment boundary for a business
 automation and intelligent operations platform. It normalizes bounded events, obtains strictly
 validated advisory AI analysis, evaluates deterministic policy, and records approval-required
 decisions before allowing fixed local actions or one narrowly scoped external mutation.
@@ -21,7 +21,7 @@ decisions before allowing fixed local actions or one narrowly scoped external mu
 >
 > **UNKNOWN requires explicit authorized reconciliation; reconciliation never replays the operation.**
 
-## Current Phase 9 scope
+## Current Phase 10 scope
 
 - Python 3.12 project using a `src` layout
 - Strict environment configuration through `APP_` variables
@@ -53,6 +53,9 @@ decisions before allowing fixed local actions or one narrowly scoped external mu
 - Safe JSON request-completion logs and server-generated correlation IDs
 - Sanitized, stable API errors and defensive response headers
 - Automated tests, security source scan, static analysis, dependency audit, and CI
+- Fail-closed production configuration and local schema validation before serving
+- Exactly pinned runtime container dependencies and non-root UID/GID `10001:10001`
+- Static release, Docker, secret, artifact, and production-constraint verification
 
 ## Architecture
 
@@ -113,6 +116,25 @@ This is application-level bearer-token authentication. It does not provide OAuth
 identity provider, automated credential rotation, centralized identity management, distributed
 rate limiting, or SSO. Production deployments should use appropriate secret management and network
 access controls.
+
+## Production deployment
+
+Production mode rejects missing, weak, or obvious placeholder authentication, GHL, and OpenAI
+credentials; DEBUG/debug configuration; non-allowlisted AI models; unsafe policy values; implicit or
+unsafe SQLite configuration; unavailable database parents; and development fallback identities.
+Validation errors never contain secret values. Startup initializes and validates only local SQLite
+state and never calls GHL, OpenAI, or another external service.
+
+The production `Dockerfile` uses Python 3.12.10 slim, exactly pinned runtime dependencies, one
+exec-form Uvicorn worker, a `/health` healthcheck, and fixed non-root UID/GID `10001:10001`. It copies
+only application source; environment files, secrets, tests, databases, Git metadata, caches, and
+coverage/build output are excluded. Persist `/app/data` as a volume owned by the runtime UID/GID and
+set `APP_APPROVAL_DATABASE_PATH=data/approvals.sqlite3` at runtime.
+
+SQLite and the process-local rate limiter make one process and one instance the supported baseline.
+TLS termination, reverse-proxy filtering, secret injection, backups, external monitoring, alerting,
+and any future multi-instance storage/coordination are deployment responsibilities. See
+[Production deployment](docs/deployment.md).
 
 ### `POST /api/v1/events`
 

@@ -129,6 +129,8 @@ ON approval_audit_events(approval_id, sequence_number);
 class ApprovalRepository(Protocol):
     def initialize(self) -> None: ...
 
+    def check_readiness(self) -> None: ...
+
     def create(
         self,
         record: ApprovalRecord,
@@ -169,6 +171,21 @@ class SQLiteApprovalRepository:
             _require_compatible_or_empty_schema(connection)
             connection.executescript(_SCHEMA)
         except SchemaCompatibilityError:
+            raise
+        except sqlite3.Error as exc:
+            raise ApprovalPersistenceError from exc
+        finally:
+            connection.close()
+
+    def check_readiness(self) -> None:
+        """Perform a bounded local connectivity and schema compatibility check."""
+
+        connection = self._connect()
+        try:
+            _require_compatible_or_empty_schema(connection)
+            if connection.execute("SELECT 1").fetchone() is None:
+                raise ApprovalPersistenceError
+        except (SchemaCompatibilityError, ApprovalPersistenceError):
             raise
         except sqlite3.Error as exc:
             raise ApprovalPersistenceError from exc

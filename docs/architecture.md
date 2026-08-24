@@ -1,9 +1,9 @@
 # Architecture
 
-Phase 9 adds server-side application authentication and closed-role authorization while preserving
-the Phase 8 reconciliation boundary and all earlier controls.
+Phase 10 adds fail-closed production startup and container/release boundaries while preserving the
+Phase 9 authenticated architecture and all earlier controls.
 
-## Phase 9 shape
+## Phase 10 shape
 
 The project uses a compact `src` layout with responsibilities split by boundary:
 
@@ -214,6 +214,25 @@ primitive as approval/execution audit events, avoiding duplicate hash-chain logi
 `APP_APPROVER_ID` and `APP_RECONCILER_ID` remain only backward-compatible direct-service development
 fallbacks. Protected HTTP operations always prefer authenticated actor identity. The model is
 application-level authentication, not OAuth/OIDC or an external identity-provider architecture.
+
+## Production boundary
+
+`Settings` retains explicit development, test, and production modes. Production construction
+rejects development defaults, DEBUG/debug operation, incomplete or weak credentials, placeholder
+secrets, a non-allowlisted OpenAI model, unsafe policy configuration, implicit/unsafe SQLite paths,
+and unavailable persistence parents. Application creation then performs only local fresh-schema or
+exact-version validation. It constructs no outbound provider client and makes no network call.
+
+Liveness remains an allocation-minimal route with no persistence or provider dependency. Production
+readiness invokes a bounded SQLite connection/schema probe using the existing foreign-key, WAL, and
+busy-timeout connection policy. Operation-scoped connections close deterministically; there are no
+background workers or shutdown queues.
+
+The supported deployment is one Uvicorn worker, one container instance, and one persistent SQLite
+volume. Authentication/mutation limits are process-local. The runtime image contains only exactly
+pinned dependencies and application source, runs as UID/GID `10001:10001`, and writes only to the
+operator-mounted `/app/data` directory. TLS, reverse proxying, external monitoring, backups, and future
+distributed coordination remain outside the application.
 
 ## Future AI evolution
 

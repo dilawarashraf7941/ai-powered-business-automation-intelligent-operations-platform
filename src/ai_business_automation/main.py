@@ -22,6 +22,7 @@ from ai_business_automation.api.routes import router
 from ai_business_automation.config import Settings, get_settings
 from ai_business_automation.logging import configure_logging
 from ai_business_automation.providers import AIAnalysisError
+from ai_business_automation.repositories import SQLiteApprovalRepository
 from ai_business_automation.repositories.security_audit import SecurityAuditRepository
 from ai_business_automation.security.auth import (
     AuthenticationError,
@@ -102,11 +103,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     """Build an application using validated, server-owned settings."""
 
     active_settings = settings or get_settings()
+    database_path = Path(active_settings.approval_database_path)
+    readiness_repository = SQLiteApprovalRepository(database_path)
+    if active_settings.environment.value == "production":
+        readiness_repository.initialize()
     configure_logging(active_settings.log_level)
     application = FastAPI(
         title="AI Business Automation Platform",
         version="0.1.0",
-        debug=False,
+        debug=active_settings.debug,
     )
     application.add_exception_handler(RequestValidationError, _validation_error_adapter)
     application.add_exception_handler(HTTPException, _http_error_adapter)
@@ -122,8 +127,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.state.rate_limiter = ProcessRateLimiter(
         active_settings.auth_failure_limit, active_settings.protected_mutation_limit
     )
-    application.state.security_audit = SecurityAuditRepository(
-        Path(active_settings.approval_database_path)
+    application.state.security_audit = SecurityAuditRepository(database_path)
+    application.state.readiness_probe = (
+        readiness_repository.check_readiness
+        if active_settings.environment.value == "production"
+        else lambda: None
     )
     application.include_router(router)
     application.add_middleware(SafeExceptionMiddleware)

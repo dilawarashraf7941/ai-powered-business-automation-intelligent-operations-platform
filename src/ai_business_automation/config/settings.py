@@ -3,12 +3,24 @@
 import hmac
 from enum import StrEnum
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from ai_business_automation.models.auth import AuthRole
+
+PRODUCTION_OPENAI_MODELS = frozenset({"gpt-5-mini"})
+_PRODUCTION_SECRET_MIN_LENGTH = 32
+_PROVIDER_SECRET_MIN_LENGTH = 24
+_PLACEHOLDER_FRAGMENTS = (
+    "change-me",
+    "example",
+    "placeholder",
+    "test-token",
+    "your-token",
+)
 
 
 class Environment(StrEnum):
@@ -29,6 +41,7 @@ class Settings(BaseSettings):
     )
 
     environment: Environment = Environment.DEVELOPMENT
+    debug: bool = False
     log_level: str = Field(default="INFO", pattern=r"^(DEBUG|INFO|WARNING|ERROR|CRITICAL)$")
     max_request_body_bytes: int = Field(default=16_384, ge=1_024, le=1_048_576)
     openai_api_key: SecretStr | None = None
@@ -78,9 +91,7 @@ class Settings(BaseSettings):
     ghl_timeout_seconds: float = Field(default=10.0, ge=1.0, le=30.0)
 
     @model_validator(mode="after")
-    def require_production_ai_credentials(self) -> "Settings":
-        if self.environment is Environment.PRODUCTION and self.openai_api_key is None:
-            raise ValueError("production requires AI provider credentials")
+    def validate_configuration(self) -> "Settings":
         if ".." in self.approval_database_path.replace("\\", "/").split("/"):
             raise ValueError("approval database path cannot traverse parent directories")
         slots = (
@@ -104,7 +115,59 @@ class Settings(BaseSettings):
                 hmac.compare_digest(candidate, other) for other in configured_tokens[index + 1 :]
             ):
                 raise ValueError("authentication tokens must be unique")
+        if self.environment is Environment.PRODUCTION:
+            self._validate_production(configured_tokens)
         return self
+
+    def _validate_production(self, configured_tokens: list[str]) -> None:
+        if self.debug or self.log_level == "DEBUG":
+            raise ValueError("production debug configuration is prohibited")
+        if not configured_tokens:
+            raise ValueError("production requires authentication credentials")
+        if any(
+            len(token) < _PRODUCTION_SECRET_MIN_LENGTH or _is_placeholder_secret(token)
+            for token in configured_tokens
+        ):
+            raise ValueError("production authentication credentials are not acceptable")
+        if self.ghl_api_key is None:
+            raise ValueError("production requires GHL credentials")
+        if _is_weak_provider_secret(self.ghl_api_key):
+            raise ValueError("production GHL credentials are not acceptable")
+        if self.openai_api_key is None:
+            raise ValueError("production requires AI provider credentials")
+        if _is_weak_provider_secret(self.openai_api_key):
+            raise ValueError("production AI credentials are not acceptable")
+        if self.openai_model not in PRODUCTION_OPENAI_MODELS:
+            raise ValueError("production AI model is not allowlisted")
+        if not 0.5 <= self.policy_confidence_threshold <= 0.99:
+            raise ValueError("production policy configuration is outside the safe range")
+        if "approval_database_path" not in self.model_fields_set:
+            raise ValueError("production requires explicit SQLite configuration")
+        database_path = Path(self.approval_database_path)
+        if not database_path.parent.exists() or not database_path.parent.is_dir():
+            raise ValueError("production SQLite parent directory is unavailable")
+        if database_path.exists() and not database_path.is_file():
+            raise ValueError("production SQLite path is not a regular file")
+        if self.approver_id == "development-approver" or self.reconciler_id == (
+            "development-reconciler"
+        ):
+            raise ValueError("production development fallback identities are prohibited")
+
+
+def _is_placeholder_secret(value: str) -> bool:
+    normalized = value.strip().lower().replace("_", "-")
+    return normalized.startswith("secret") or any(
+        fragment in normalized for fragment in _PLACEHOLDER_FRAGMENTS
+    )
+
+
+def _is_weak_provider_secret(value: SecretStr) -> bool:
+    secret = value.get_secret_value()
+    return (
+        len(secret) < _PROVIDER_SECRET_MIN_LENGTH
+        or any(character.isspace() for character in secret)
+        or _is_placeholder_secret(secret)
+    )
 
 
 @lru_cache

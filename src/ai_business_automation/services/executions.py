@@ -7,11 +7,17 @@ from datetime import UTC, datetime
 
 from pydantic import ValidationError
 
-from ai_business_automation.models import ActionContext, ExecutionRecord, ExecutionStatus
+from ai_business_automation.models import (
+    ActionContext,
+    ExecutionFailureCategory,
+    ExecutionRecord,
+    ExecutionStatus,
+)
 from ai_business_automation.repositories import ExecutionRepository
 from ai_business_automation.services.actions import (
     ActionRegistry,
     DefinitiveActionFailure,
+    UnknownActionOutcome,
 )
 
 _LOGGER = logging.getLogger("ai_business_automation.executions")
@@ -37,6 +43,7 @@ class ExecutionService:
             action=claimed.action,
             risk=approval.risk,
             started_at=claimed.started_at,
+            action_parameters=approval.action_parameters,
         )
         if context.action not in self.registry.actions:
             completed = self.repository.complete(
@@ -44,17 +51,35 @@ class ExecutionService:
                 ExecutionStatus.FAILED,
                 _utc(self.clock()),
                 "Action is not allowlisted.",
+                failure_category=ExecutionFailureCategory.ACTION_NOT_ALLOWED,
             )
             self._log("execution_failed", completed, "action_not_allowed")
             return completed
         try:
             outcome = self.registry.execute(context)
-        except (DefinitiveActionFailure, ValidationError):
+        except DefinitiveActionFailure as exc:
             completed = self.repository.complete(
                 claimed.execution_id,
                 ExecutionStatus.FAILED,
                 _utc(self.clock()),
                 "Internal action definitively failed.",
+                failure_category=ExecutionFailureCategory(exc.category),
+            )
+        except ValidationError:
+            completed = self.repository.complete(
+                claimed.execution_id,
+                ExecutionStatus.FAILED,
+                _utc(self.clock()),
+                "Internal action validation failed.",
+                failure_category=ExecutionFailureCategory.INTERNAL_FAILURE,
+            )
+        except UnknownActionOutcome as exc:
+            completed = self.repository.complete(
+                claimed.execution_id,
+                ExecutionStatus.UNKNOWN,
+                _utc(self.clock()),
+                "Internal action outcome is unknown.",
+                failure_category=ExecutionFailureCategory(exc.category),
             )
         except Exception:
             completed = self.repository.complete(
@@ -62,6 +87,7 @@ class ExecutionService:
                 ExecutionStatus.UNKNOWN,
                 _utc(self.clock()),
                 "Internal action outcome is unknown.",
+                failure_category=ExecutionFailureCategory.INTERNAL_UNKNOWN,
             )
         else:
             completed = self.repository.complete(
@@ -96,6 +122,10 @@ class ExecutionService:
                     record.result_code.value if record.result_code is not None else "PENDING"
                 ),
                 "outcome": outcome,
+                "error_category": (
+                    record.failure_category.value if record.failure_category is not None else "NONE"
+                ),
+                "provider": ("GHL" if record.action.value == "GHL_ADD_CONTACT_TAG" else "INTERNAL"),
             },
         )
 

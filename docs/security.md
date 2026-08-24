@@ -80,11 +80,11 @@ allowlist; wildcard CORS is not acceptable.
 ## Excluded dangerous capabilities
 
 Production code contains no dynamic evaluation, shell or subprocess access, arbitrary imports,
-generic HTTP client, client-controlled URL construction, external business integration, workflow
-runner, or autonomous action selection. Persistence is confined to approval and execution
-repositories and contains no event content. The isolated OpenAI adapter is the only outbound
-provider boundary. A focused AST-based security scan and tests guard these Phase 6 exclusions. No
-event is persisted, deduplicated, queued, or processed in the background.
+generic HTTP client, client-controlled URL construction, workflow runner, or autonomous action
+selection. Persistence is confined to approval and execution repositories and contains no event
+content. The isolated OpenAI and single-operation GHL adapters are the only outbound provider
+boundaries. A focused AST-based security scan verifies HTTP isolation. No event is deduplicated,
+queued, or processed in the background.
 
 ## AI input and prompt-injection controls
 
@@ -116,7 +116,7 @@ AI logs contain only allowlisted event ID/type, provider name, outcome, stable f
 bounded latency. Events, customer text, prompts, responses, credentials, headers, and PII are never
 logged. The official OpenAI SDK exists only in the provider adapter. Requests include no tools,
 functions, web search, code interpreter, conversation state, or arbitrary URL. AI is advisory only
-and cannot execute actions, call GHL or n8n, invoke workflows, or modify business state.
+and cannot execute actions, call a provider or n8n, invoke workflows, or modify business state.
 
 ## Policy trust boundary
 
@@ -148,9 +148,7 @@ Policy logs contain only allowlisted request/event identifiers, decision, action
 version, event type, and outcome. They exclude events, payloads, customer text, AI content, headers,
 credentials, and secrets.
 
-**AI recommends. Policy decides. Human approves. Executor performs only allowlisted internal actions.**
-
-**External business integrations are future work.**
+**AI recommends. Policy decides. Human approves. Executor performs only the approved allowlisted operation.**
 
 ## Approval persistence security
 
@@ -203,13 +201,33 @@ Failure invokes no handler and appends `EXECUTION_REJECTED` when the existing ch
 `BEGIN IMMEDIATE`, a unique execution-per-approval constraint, and a conditional `PENDING` claim
 prevent replay and concurrent double execution.
 
-The static registry has no registration API or dynamic loading. Its five handlers operate only on
-bounded Pydantic schemas and return typed local effects persisted with terminal success. Production
-action code imports no HTTP client, socket, subprocess, shell, dynamic importer, provider SDK, or
-tool framework. It cannot call GHL, n8n, messaging, CRM, email, webhooks, or arbitrary endpoints.
+The static registry has no registration API or dynamic loading. Its five local handlers operate on
+bounded Pydantic schemas and return typed local effects. The sixth and only external handler can
+invoke only the dedicated GHL `add_contact_tag` provider method. Policy, approval, authorization,
+models, routes, and local action handlers import no HTTP client, socket, subprocess, shell, dynamic
+importer, provider SDK, or tool framework.
 
 `SUCCEEDED`, `FAILED`, and `UNKNOWN` are terminal. A definitive failure and an indeterminate outcome
 are both recorded without automatic retry; `UNKNOWN` requires a future reconciliation design.
 Execution results expose no actor configuration, effect content, payload, AI content, provider
 response, credential, SQL detail, or filesystem path. Logs allowlist execution/approval/event IDs,
 closed action/status/result codes, request ID, and safe outcome only.
+
+## GHL integration security
+
+`GHL_CONTACT_TAG_REQUEST` is internal-only and carries a strict bounded contact identifier and one
+to ten safe tags. IDs reject URLs, slashes, query syntax, whitespace, and excessive length. Tags
+reject URLs, credential-like content, control characters, duplicates, unknown fields, and excessive
+count or length. Tags are deterministically ordered before provenance hashing.
+
+The API key is a server-owned `SecretStr`. It is not part of event, approval, provenance, execution,
+effect, audit, response, or log schemas. The adapter alone unwraps it to build `Authorization`; the
+fixed origin, path shape, version, timeout, headers, and strict `{tags}` body cannot be supplied by a
+client. Raw provider bodies and exception text never cross the adapter boundary.
+
+Failures use closed categories: `GHL_AUTHENTICATION`, `GHL_AUTHORIZATION`, `GHL_RATE_LIMIT`,
+`GHL_VALIDATION`, `GHL_NOT_FOUND`, `GHL_TIMEOUT`, `GHL_NETWORK`, `GHL_SERVER_ERROR`, and
+`GHL_UNKNOWN`. Definitive provider responses become `FAILED`; ambiguous timeout or interrupted
+transmission becomes terminal `UNKNOWN`, with no retry. Manual reconciliation is required before
+any future action. There is no arbitrary URL or generic HTTP capability, no other GHL endpoint, no
+n8n integration, and no other CRM mutation.

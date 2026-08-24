@@ -54,7 +54,10 @@ def api_event(**updates: object) -> dict[str, object]:
 
 @pytest.mark.parametrize("event_type", list(EventType))
 def test_all_supported_event_types_are_accepted(client: TestClient, event_type: EventType) -> None:
-    response = client.post("/api/v1/events", json=api_event(event_type=event_type.value))
+    updates: dict[str, object] = {"event_type": event_type.value}
+    if event_type is EventType.GHL_CONTACT_TAG_REQUEST:
+        updates.update(source="INTERNAL", payload={"contact_id": "contact_123", "tags": ["vip"]})
+    response = client.post("/api/v1/events", json=api_event(**updates))
     assert response.status_code == 202
     assert response.json()["event_type"] == event_type.value
 
@@ -160,6 +163,7 @@ def test_deterministic_classification_is_complete() -> None:
         EventType.SUPPORT_REQUEST: EventCategory.SUPPORT,
         EventType.INTERNAL_TASK: EventCategory.INTERNAL,
         EventType.SYSTEM_ALERT: EventCategory.SYSTEM,
+        EventType.GHL_CONTACT_TAG_REQUEST: EventCategory.INTERNAL,
     }
     classifier = EventClassifier()
     assert {event_type: classifier.classify(event_type) for event_type in EventType} == expected

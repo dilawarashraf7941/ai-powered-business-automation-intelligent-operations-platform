@@ -4,6 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from ai_business_automation.config import get_settings
+from ai_business_automation.providers.ghl_factory import create_ghl_provider
 from ai_business_automation.repositories import SQLiteExecutionRepository
 from ai_business_automation.services.actions import ActionRegistry
 from ai_business_automation.services.executions import ExecutionService
@@ -16,6 +17,6 @@ def get_execution_service() -> ExecutionService:
     repository.initialize()
     return ExecutionService(
         repository=repository,
-        registry=ActionRegistry(),
+        registry=ActionRegistry(create_ghl_provider(settings)),
         actor_id=settings.approver_id,
     )

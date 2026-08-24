@@ -13,6 +13,7 @@ _CATEGORY_BY_EVENT_TYPE: dict[EventType, EventCategory] = {
     EventType.SUPPORT_REQUEST: EventCategory.SUPPORT,
     EventType.INTERNAL_TASK: EventCategory.INTERNAL,
     EventType.SYSTEM_ALERT: EventCategory.SYSTEM,
+    EventType.GHL_CONTACT_TAG_REQUEST: EventCategory.INTERNAL,
 }
 
 

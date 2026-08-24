@@ -7,6 +7,7 @@ from typing import Annotated
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 from ai_business_automation.models.approvals import ActorId, ApprovalId, EventId
+from ai_business_automation.models.ghl import GHLAddContactTagParameters
 from ai_business_automation.models.policy import RecommendedAction, RiskLevel
 
 
@@ -16,6 +17,7 @@ class ExecutionAction(StrEnum):
     UPDATE_INTERNAL_STATUS = "UPDATE_INTERNAL_STATUS"
     REQUEST_HUMAN_REVIEW = "REQUEST_HUMAN_REVIEW"
     GENERATE_INTERNAL_NOTE = "GENERATE_INTERNAL_NOTE"
+    GHL_ADD_CONTACT_TAG = "GHL_ADD_CONTACT_TAG"
 
 
 class ExecutionStatus(StrEnum):
@@ -30,6 +32,21 @@ class ExecutionResultCode(StrEnum):
     COMPLETED = "COMPLETED"
     DEFINITIVE_FAILURE = "DEFINITIVE_FAILURE"
     OUTCOME_UNKNOWN = "OUTCOME_UNKNOWN"
+
+
+class ExecutionFailureCategory(StrEnum):
+    ACTION_NOT_ALLOWED = "ACTION_NOT_ALLOWED"
+    INTERNAL_FAILURE = "INTERNAL_FAILURE"
+    INTERNAL_UNKNOWN = "INTERNAL_UNKNOWN"
+    GHL_AUTHENTICATION = "GHL_AUTHENTICATION"
+    GHL_AUTHORIZATION = "GHL_AUTHORIZATION"
+    GHL_RATE_LIMIT = "GHL_RATE_LIMIT"
+    GHL_VALIDATION = "GHL_VALIDATION"
+    GHL_NOT_FOUND = "GHL_NOT_FOUND"
+    GHL_TIMEOUT = "GHL_TIMEOUT"
+    GHL_NETWORK = "GHL_NETWORK"
+    GHL_SERVER_ERROR = "GHL_SERVER_ERROR"
+    GHL_UNKNOWN = "GHL_UNKNOWN"
 
 
 class InternalPriority(StrEnum):
@@ -72,6 +89,7 @@ class ExecutionRecord(BaseModel):
     result_code: ExecutionResultCode | None = None
     safe_summary: SafeSummary | None = None
     actor_id: ActorId
+    failure_category: ExecutionFailureCategory | None = None
 
     def public(self) -> "ExecutionResponse":
         return ExecutionResponse(
@@ -137,6 +155,14 @@ class ActionContext(BaseModel):
     action: ExecutionAction
     risk: RiskLevel
     started_at: AwareDatetime
+    action_parameters: GHLAddContactTagParameters | None = None
+
+    @model_validator(mode="after")
+    def validate_action_parameters(self) -> "ActionContext":
+        requires_parameters = self.action is ExecutionAction.GHL_ADD_CONTACT_TAG
+        if requires_parameters != (self.action_parameters is not None):
+            raise ValueError("execution action parameters do not match the action")
+        return self
 
 
 class NoOpInput(BaseModel):
@@ -189,7 +215,7 @@ class ActionOutcome(BaseModel):
 
     result_code: Annotated[str, Field(pattern=r"^COMPLETED$")]
     safe_summary: SafeSummary
-    effect: InternalActionEffect
+    effect: InternalActionEffect | None = None
 
 
 def execution_action_for(recommendation: RecommendedAction) -> ExecutionAction:
@@ -203,4 +229,5 @@ def execution_action_for(recommendation: RecommendedAction) -> ExecutionAction:
         RecommendedAction.ESCALATE: ExecutionAction.CREATE_INTERNAL_TASK,
         RecommendedAction.SCHEDULE_CONSULTATION: ExecutionAction.CREATE_INTERNAL_TASK,
         RecommendedAction.NURTURE: ExecutionAction.GENERATE_INTERNAL_NOTE,
+        RecommendedAction.GHL_ADD_CONTACT_TAG: ExecutionAction.GHL_ADD_CONTACT_TAG,
     }[recommendation]

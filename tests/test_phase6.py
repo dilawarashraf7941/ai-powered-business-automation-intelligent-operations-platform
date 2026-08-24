@@ -343,6 +343,7 @@ def test_action_taxonomy_and_mapping_are_closed() -> None:
         ExecutionAction.UPDATE_INTERNAL_STATUS,
         ExecutionAction.REQUEST_HUMAN_REVIEW,
         ExecutionAction.GENERATE_INTERNAL_NOTE,
+        ExecutionAction.GHL_ADD_CONTACT_TAG,
     }
     expected = {
         RecommendedAction.NONE: ExecutionAction.NO_OP,
@@ -352,6 +353,7 @@ def test_action_taxonomy_and_mapping_are_closed() -> None:
         RecommendedAction.ESCALATE: ExecutionAction.CREATE_INTERNAL_TASK,
         RecommendedAction.SCHEDULE_CONSULTATION: ExecutionAction.CREATE_INTERNAL_TASK,
         RecommendedAction.NURTURE: ExecutionAction.GENERATE_INTERNAL_NOTE,
+        RecommendedAction.GHL_ADD_CONTACT_TAG: ExecutionAction.GHL_ADD_CONTACT_TAG,
     }
     assert {action: execution_action_for(action) for action in RecommendedAction} == expected
     with pytest.raises(ValueError):
@@ -361,7 +363,8 @@ def test_action_taxonomy_and_mapping_are_closed() -> None:
 def test_static_registry_executes_every_bounded_internal_handler() -> None:
     registry = ActionRegistry()
     assert registry.actions == frozenset(ExecutionAction)
-    for action in ExecutionAction:
+    internal_actions = set(ExecutionAction) - {ExecutionAction.GHL_ADD_CONTACT_TAG}
+    for action in internal_actions:
         context = ActionContext(
             execution_id="exe_abcdefghijklmnopqrstuvwxyz",
             approval_id="apr_abcdefghijklmnopqrstuvwxyz",
@@ -373,6 +376,7 @@ def test_static_registry_executes_every_bounded_internal_handler() -> None:
         outcome = registry.execute(context)
         assert outcome.result_code == "COMPLETED"
         assert 1 <= len(outcome.safe_summary) <= 200
+        assert outcome.effect is not None
         assert 1 <= len(outcome.effect.content) <= 1000
     for risk, expected in (
         (RiskLevel.LOW, "LOW"),
@@ -388,6 +392,7 @@ def test_static_registry_executes_every_bounded_internal_handler() -> None:
                 started_at=FIXED_NOW,
             )
         )
+        assert task.effect is not None
         assert task.effect.content.endswith(expected)
 
 

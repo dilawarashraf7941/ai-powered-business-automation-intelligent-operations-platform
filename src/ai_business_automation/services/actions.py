@@ -18,14 +18,28 @@ from ai_business_automation.models import (
     NoOpInput,
     RiskLevel,
 )
+from ai_business_automation.providers import (
+    GHLOutcomeCertainty,
+    GHLProvider,
+    GHLProviderError,
+    UnavailableGHLProvider,
+)
 
 
 class DefinitiveActionFailure(Exception):
     """A local handler definitively did not complete its action."""
 
+    def __init__(self, category: str = "INTERNAL_FAILURE") -> None:
+        self.category = category
+        super().__init__(category)
+
 
 class UnknownActionOutcome(Exception):
     """A handler outcome cannot be established and must never be retried automatically."""
+
+    def __init__(self, category: str = "INTERNAL_UNKNOWN") -> None:
+        self.category = category
+        super().__init__(category)
 
 
 class ActionHandler(Protocol):
@@ -111,26 +125,50 @@ class GenerateInternalNoteHandler:
         )
 
 
-_HANDLERS: MappingProxyType[ExecutionAction, ActionHandler] = MappingProxyType(
-    {
-        ExecutionAction.NO_OP: NoOpHandler(),
-        ExecutionAction.CREATE_INTERNAL_TASK: CreateInternalTaskHandler(),
-        ExecutionAction.UPDATE_INTERNAL_STATUS: UpdateInternalStatusHandler(),
-        ExecutionAction.REQUEST_HUMAN_REVIEW: RequestHumanReviewHandler(),
-        ExecutionAction.GENERATE_INTERNAL_NOTE: GenerateInternalNoteHandler(),
-    }
-)
+class GHLAddContactTagHandler:
+    """Invoke only the dedicated provider method with approval-bound parameters."""
+
+    def __init__(self, provider: GHLProvider) -> None:
+        self._provider = provider
+
+    def execute(self, context: ActionContext) -> ActionOutcome:
+        if context.action_parameters is None:
+            raise DefinitiveActionFailure("GHL_VALIDATION")
+        try:
+            self._provider.add_contact_tag(context.action_parameters)
+        except GHLProviderError as exc:
+            if exc.certainty is GHLOutcomeCertainty.DEFINITIVE:
+                raise DefinitiveActionFailure(exc.category.value) from exc
+            raise UnknownActionOutcome(exc.category.value) from exc
+        return ActionOutcome(
+            result_code="COMPLETED",
+            safe_summary="GHL contact tag operation completed.",
+        )
 
 
 class ActionRegistry:
     """Closed registry; actions and handlers cannot be registered at runtime."""
 
+    def __init__(self, ghl_provider: GHLProvider | None = None) -> None:
+        self._handlers: MappingProxyType[ExecutionAction, ActionHandler] = MappingProxyType(
+            {
+                ExecutionAction.NO_OP: NoOpHandler(),
+                ExecutionAction.CREATE_INTERNAL_TASK: CreateInternalTaskHandler(),
+                ExecutionAction.UPDATE_INTERNAL_STATUS: UpdateInternalStatusHandler(),
+                ExecutionAction.REQUEST_HUMAN_REVIEW: RequestHumanReviewHandler(),
+                ExecutionAction.GENERATE_INTERNAL_NOTE: GenerateInternalNoteHandler(),
+                ExecutionAction.GHL_ADD_CONTACT_TAG: GHLAddContactTagHandler(
+                    ghl_provider or UnavailableGHLProvider()
+                ),
+            }
+        )
+
     @property
     def actions(self) -> frozenset[ExecutionAction]:
-        return frozenset(_HANDLERS)
+        return frozenset(self._handlers)
 
     def execute(self, context: ActionContext) -> ActionOutcome:
-        return _HANDLERS[context.action].execute(context)
+        return self._handlers[context.action].execute(context)
 
 
 def _priority(risk: RiskLevel) -> InternalPriority:

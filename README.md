@@ -1,25 +1,25 @@
 # AI-Powered Business Automation & Intelligent Operations Platform
 
-This repository contains the secure Phase 6 controlled internal-execution boundary for a future business
+This repository contains the secure Phase 7 controlled execution boundary for a business
 automation and intelligent operations platform. It normalizes bounded events, obtains strictly
 validated advisory AI analysis, evaluates deterministic policy, and records approval-required
-decisions before allowing only fixed local application actions.
+decisions before allowing fixed local actions or one narrowly scoped external mutation.
 
 > **AI IS ADVISORY ONLY.**
 >
-> **AI CANNOT SELECT OR EXECUTE ACTIONS, CALL GHL OR N8N, OR INVOKE TOOLS.**
+> **AI CANNOT SELECT OR EXECUTE ACTIONS, CALL PROVIDERS OR N8N, OR INVOKE TOOLS.**
 >
-> **NO EXTERNAL BUSINESS INTEGRATIONS ARE IMPLEMENTED.**
+> **ONLY ONE GHL MUTATION IS SUPPORTED: ADD_CONTACT_TAG.**
 >
-> **ONLY SERVER-ALLOWLISTED INTERNAL ACTIONS ARE IMPLEMENTED.**
+> **NO GENERIC HTTP CAPABILITY OR ARBITRARY GHL ENDPOINT EXISTS.**
 >
 > **NO EXTERNAL WORKFLOW EXECUTION IS IMPLEMENTED.**
 >
-> **AI recommends. Policy decides. Human approves. Executor performs only allowlisted internal actions.**
+> **AI recommends. Policy decides. Human approves. Executor performs only the approved allowlisted operation.**
 >
-> **External business integrations are future work.**
+> **The provider adapter performs one fixed external mutation.**
 
-## Current Phase 6 scope
+## Current Phase 7 scope
 
 - Python 3.12 project using a `src` layout
 - Strict environment configuration through `APP_` variables
@@ -34,7 +34,10 @@ decisions before allowing only fixed local application actions.
 - Transactional local SQLite approval records with a server-owned 30-minute default TTL
 - Canonical SHA-256 provenance commitments and an application-enforced audit hash chain
 - Single-use internal execution records with atomic SQLite claiming
-- A static registry of five bounded local action handlers with no networking or shell access
+- A static registry of five bounded local handlers and one dedicated GHL contact-tag handler
+- Fixed GHL origin `https://services.leadconnectorhq.com` and path `POST /contacts/{contactId}/tags`
+- Server-owned bearer authentication, API version `v3`, and bounded timeout
+- Approval provenance commits to canonical contact ID and tag parameters
 - Stable provider failure categories with a 1–60 second timeout range and no retries
 - 16 KiB request-body ceiling enforced before framework body parsing
 - Safe JSON request-completion logs and server-generated correlation IDs
@@ -45,9 +48,9 @@ decisions before allowing only fixed local application actions.
 
 The API layer accepts HTTP input and maps it into strict Pydantic models. Side-effect-free services
 normalize and classify events, isolate advisory AI access, and apply deterministic policy.
-Configuration, logging, and security middleware are separated into focused packages. The fixed
-OpenAI adapter remains the only outbound boundary; policy, approvals, and actions perform no
-networking.
+Configuration, logging, and security middleware are separated into focused packages. Outbound
+networking is isolated to the OpenAI analysis adapter and the dedicated GHL adapter. Policy,
+approvals, execution authorization, models, and API routes perform no networking.
 
 See [Architecture](docs/architecture.md) and [Security](docs/security.md) for the trust boundaries
 and design rationale.
@@ -154,7 +157,7 @@ approval row stores the expected audit count and head hash so deletion of the fi
 detectable. Audit verification detects modification, deletion, reordering, broken links, and
 duplicate identities.
 
-## Controlled internal action execution
+## Controlled action execution
 
 `POST /api/v1/actions/execute` accepts exactly `{ "approval_id": "..." }`. The server reloads the
 approval, verifies the approval and audit hash chains, requires `APPROVED` status before TTL expiry,
@@ -163,10 +166,10 @@ execution ID, action, URL, method, headers, body, credentials, command, module, 
 timeout, retry policy, or actor.
 
 The closed execution actions are `NO_OP`, `CREATE_INTERNAL_TASK`, `UPDATE_INTERNAL_STATUS`,
-`REQUEST_HUMAN_REVIEW`, and `GENERATE_INTERNAL_NOTE`. A static server-owned registry binds each enum
-to one deterministic Python handler. Handler inputs and effects are strict bounded models; effects
-are local SQLite records only. There is no runtime registration, dynamic import, plugin loading,
-generic HTTP client, shell, subprocess, provider call, or client-selected callable.
+`REQUEST_HUMAN_REVIEW`, `GENERATE_INTERNAL_NOTE`, and `GHL_ADD_CONTACT_TAG`. A static server-owned
+registry binds each enum to one dedicated handler. Handler inputs and local effects are strict
+bounded models. There is no runtime registration, dynamic import, plugin loading, generic HTTP
+client, shell, subprocess, arbitrary provider call, or client-selected callable.
 
 Execution follows `PENDING → CLAIMED → SUCCEEDED | FAILED | UNKNOWN`. Creation and claim occur in
 one `BEGIN IMMEDIATE` transaction with a unique approval reference and conditional pending-only
@@ -183,9 +186,10 @@ storing event payloads, AI content, provider responses, or credentials.
 
 Supported event types are `CUSTOMER_REQUEST`, `CUSTOMER_MESSAGE`, `CUSTOMER_CREATED`,
 `CUSTOMER_UPDATED`, `ORDER_CREATED`, `ORDER_UPDATED`, `PAYMENT_RECEIVED`, `SUPPORT_REQUEST`,
-`INTERNAL_TASK`, and `SYSTEM_ALERT`. Supported sources are `WEB_FORM`, `API`, `WEBHOOK`, `IMPORT`,
-and `INTERNAL`. Clients cannot define event types, sources, categories, server IDs, receipt times, or
-metadata.
+`INTERNAL_TASK`, `SYSTEM_ALERT`, and `GHL_CONTACT_TAG_REQUEST`. The GHL request type requires the
+`INTERNAL` source and the exact bounded `{contact_id, tags}` schema. Supported sources are
+`WEB_FORM`, `API`, `WEBHOOK`, `IMPORT`, and `INTERNAL`. Clients cannot define event types, sources,
+categories, server IDs, receipt times, or metadata.
 
 Customer events map to `CUSTOMER`; order and payment events map to `COMMERCE`; support requests map
 to `SUPPORT`; internal tasks map to `INTERNAL`; and system alerts map to `SYSTEM`.
@@ -250,14 +254,31 @@ Coverage is required to remain at or above 95%.
 - Keep CORS disabled until an explicit, reviewed origin allowlist is required.
 - Exclude arbitrary networking, dynamic execution, shell access, and provider credentials.
 
+## GHL provider boundary
+
+`GHL_ADD_CONTACT_TAG` is selected only by deterministic policy for a validated internal
+`GHL_CONTACT_TAG_REQUEST`, then bound—together with its canonical contact ID and tags—to trusted
+approval provenance. The execution API still accepts only `approval_id`; it cannot accept or alter
+the provider, operation, target, tags, origin, path, version, timeout, headers, or body.
+
+`GHLClient` exposes only `add_contact_tag`. It constructs the fixed origin and endpoint internally,
+adds the server-owned bearer credential and `Version: v3`, and validates the bounded response. It
+does not expose a generic request method and sends no invented idempotency header. Provider response
+bodies, authorization, contact IDs, tags, and credentials are excluded from API responses and logs.
+The credential is a deployment secret supplied through `APP_GHL_API_KEY`; it is never persisted.
+
+Definitive HTTP failures become `FAILED` with one of the closed GHL failure categories. Timeout or
+an ambiguous transport interruption becomes `UNKNOWN`. Neither result is retried or replayed;
+`UNKNOWN` requires future manual reconciliation. The audit chain binds the safe failure category,
+while excluding request/response bodies and secrets.
+
 ## Current limitations
 
-Phase 6 intentionally has no real authentication, queue, external business integration, workflow
-engine, tool calling, AI memory, or autonomous action selection. SQLite persists approval,
-execution, audit, and bounded internal-effect metadata; business events and AI content are not
-stored. The fixed OpenAI provider adapter remains the only outbound boundary. Internal execution is
-single-process and local; there is no distributed lock, retry worker, reconciliation process, or
-external provider delivery guarantee.
+Phase 7 intentionally has no real authentication, queue, workflow engine, tool calling, AI memory,
+autonomous action selection, n8n integration, or other CRM mutation. SQLite persists approval,
+execution, audit, action-parameter commitments, and bounded internal-effect metadata; business
+events and AI content are not stored. Execution is single-process and there is no distributed lock,
+retry worker, reconciliation process, or external provider delivery guarantee.
 
 ## Roadmap
 

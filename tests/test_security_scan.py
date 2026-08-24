@@ -10,7 +10,7 @@ SOURCE = ROOT / "src"
 
 
 def test_production_source_has_no_dangerous_capabilities() -> None:
-    forbidden_imports = {"subprocess", "requests", "httpx", "urllib", "importlib"}
+    forbidden_imports = {"subprocess", "requests", "urllib", "importlib"}
     forbidden_calls = {"eval", "exec", "compile", "__import__", "os.system"}
     findings: list[str] = []
     for path in SOURCE.rglob("*.py"):
@@ -38,6 +38,19 @@ def test_production_source_has_no_dangerous_capabilities() -> None:
                     for keyword in node.keywords
                 )
     assert findings == []
+
+
+def test_httpx_is_confined_to_the_ghl_provider_adapter() -> None:
+    importers: set[str] = set()
+    for path in SOURCE.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        if any(
+            (isinstance(node, ast.Import) and any(alias.name == "httpx" for alias in node.names))
+            or (isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "httpx")
+            for node in ast.walk(tree)
+        ):
+            importers.add(path.relative_to(ROOT).as_posix())
+    assert importers == {"src/ai_business_automation/providers/ghl.py"}
 
 
 def _call_name(node: ast.expr) -> str:
@@ -72,7 +85,7 @@ def test_openai_sdk_is_confined_to_provider_adapter() -> None:
 
 def test_no_action_framework_or_business_integration_is_present() -> None:
     combined = "\n".join(path.read_text(encoding="utf-8").lower() for path in SOURCE.rglob("*.py"))
-    for prohibited in ("langchain", "langgraph", "crewai", "autogen", "n8n", "ghl"):
+    for prohibited in ("langchain", "langgraph", "crewai", "autogen", "n8n"):
         assert prohibited not in combined
 
 

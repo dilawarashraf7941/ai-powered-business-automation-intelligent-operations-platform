@@ -16,6 +16,7 @@ from ai_business_automation.models import (
     ApprovalStatus,
     AuditEventType,
     ExecutionAction,
+    ExecutionFailureCategory,
     ExecutionRecord,
     ExecutionResultCode,
     ExecutionStatus,
@@ -49,7 +50,7 @@ CREATE TABLE IF NOT EXISTS executions (
     event_id TEXT NOT NULL CHECK(length(event_id) BETWEEN 20 AND 40),
     action TEXT NOT NULL CHECK(action IN (
         'NO_OP', 'CREATE_INTERNAL_TASK', 'UPDATE_INTERNAL_STATUS',
-        'REQUEST_HUMAN_REVIEW', 'GENERATE_INTERNAL_NOTE'
+        'REQUEST_HUMAN_REVIEW', 'GENERATE_INTERNAL_NOTE', 'GHL_ADD_CONTACT_TAG'
     )),
     status TEXT NOT NULL CHECK(status IN ('PENDING', 'CLAIMED', 'SUCCEEDED', 'FAILED', 'UNKNOWN')),
     started_at TEXT NOT NULL CHECK(length(started_at) BETWEEN 20 AND 40),
@@ -57,6 +58,15 @@ CREATE TABLE IF NOT EXISTS executions (
     result_code TEXT CHECK(result_code IN ('COMPLETED', 'DEFINITIVE_FAILURE', 'OUTCOME_UNKNOWN')),
     safe_summary TEXT CHECK(safe_summary IS NULL OR length(safe_summary) BETWEEN 1 AND 200),
     actor_id TEXT NOT NULL CHECK(length(actor_id) BETWEEN 1 AND 64),
+    failure_category TEXT CHECK(failure_category IS NULL OR failure_category IN (
+        'ACTION_NOT_ALLOWED', 'INTERNAL_FAILURE', 'INTERNAL_UNKNOWN',
+        'GHL_AUTHENTICATION', 'GHL_AUTHORIZATION', 'GHL_RATE_LIMIT',
+        'GHL_VALIDATION', 'GHL_NOT_FOUND', 'GHL_TIMEOUT', 'GHL_NETWORK',
+        'GHL_SERVER_ERROR', 'GHL_UNKNOWN'
+    )),
+    action_parameters_hash TEXT CHECK(
+        action_parameters_hash IS NULL OR length(action_parameters_hash) = 64
+    ),
     effect_hash TEXT CHECK(effect_hash IS NULL OR length(effect_hash) = 64),
     integrity_hash TEXT NOT NULL CHECK(length(integrity_hash) = 64),
     FOREIGN KEY(approval_id) REFERENCES approvals(approval_id) ON DELETE RESTRICT
@@ -90,6 +100,7 @@ class ExecutionRepository(Protocol):
         now: datetime,
         safe_summary: str,
         outcome: ActionOutcome | None = None,
+        failure_category: ExecutionFailureCategory | None = None,
     ) -> ExecutionRecord: ...
 
     def get_execution(self, execution_id: str) -> ExecutionRecord: ...
@@ -168,6 +179,11 @@ class SQLiteExecutionRepository(SQLiteApprovalRepository):
 
             execution_id = self._execution_id_factory()
             action = execution_action_for(approval.action)
+            action_parameters_hash = (
+                sha256_hex(canonical_json_bytes(approval.action_parameters.model_dump(mode="json")))
+                if approval.action_parameters is not None
+                else None
+            )
             started_at = _datetime_text(now)
             claimed_hash = _execution_hash(
                 execution_id=execution_id,
@@ -180,14 +196,16 @@ class SQLiteExecutionRepository(SQLiteApprovalRepository):
                 result_code=None,
                 safe_summary=None,
                 actor_id=actor_id,
+                failure_category=None,
+                action_parameters_hash=action_parameters_hash,
             )
             connection.execute(
                 """
                 INSERT INTO executions (
                     execution_id, approval_id, event_id, action, status, started_at,
-                    completed_at, result_code, safe_summary, actor_id, effect_hash,
-                    integrity_hash
-                ) VALUES (?, ?, ?, ?, 'PENDING', ?, NULL, NULL, NULL, ?, NULL, ?)
+                    completed_at, result_code, safe_summary, actor_id, failure_category,
+                    action_parameters_hash, effect_hash, integrity_hash
+                ) VALUES (?, ?, ?, ?, 'PENDING', ?, NULL, NULL, NULL, ?, NULL, ?, NULL, ?)
                 """,
                 (
                     execution_id,
@@ -196,6 +214,7 @@ class SQLiteExecutionRepository(SQLiteApprovalRepository):
                     action.value,
                     started_at,
                     actor_id,
+                    action_parameters_hash,
                     claimed_hash,
                 ),
             )
@@ -254,6 +273,7 @@ class SQLiteExecutionRepository(SQLiteApprovalRepository):
         now: datetime,
         safe_summary: str,
         outcome: ActionOutcome | None = None,
+        failure_category: ExecutionFailureCategory | None = None,
     ) -> ExecutionRecord:
         if target not in {
             ExecutionStatus.SUCCEEDED,
@@ -282,25 +302,32 @@ class SQLiteExecutionRepository(SQLiteApprovalRepository):
                 ExecutionStatus.FAILED: ExecutionResultCode.DEFINITIVE_FAILURE,
                 ExecutionStatus.UNKNOWN: ExecutionResultCode.OUTCOME_UNKNOWN,
             }[target]
+            if (target is ExecutionStatus.SUCCEEDED) != (failure_category is None):
+                raise ExecutionConflictError
             if target is ExecutionStatus.SUCCEEDED:
                 if outcome is None:
                     raise ExecutionConflictError
-                connection.execute(
-                    """
-                    INSERT INTO internal_action_effects (
-                        execution_id, object_id, object_type, content, created_at
-                    ) VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (
-                        execution_id,
-                        outcome.effect.object_id,
-                        outcome.effect.object_type,
-                        outcome.effect.content,
-                        _datetime_text(now),
-                    ),
-                )
+                if outcome.effect is not None:
+                    connection.execute(
+                        """
+                        INSERT INTO internal_action_effects (
+                            execution_id, object_id, object_type, content, created_at
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            execution_id,
+                            outcome.effect.object_id,
+                            outcome.effect.object_type,
+                            outcome.effect.content,
+                            _datetime_text(now),
+                        ),
+                    )
                 effect_hash = sha256_hex(
-                    canonical_json_bytes(outcome.effect.model_dump(mode="json"))
+                    canonical_json_bytes(
+                        outcome.effect.model_dump(mode="json")
+                        if outcome.effect is not None
+                        else None
+                    )
                 )
             elif outcome is not None:
                 raise ExecutionConflictError
@@ -320,12 +347,18 @@ class SQLiteExecutionRepository(SQLiteApprovalRepository):
                 safe_summary=safe_summary,
                 actor_id=str(row["actor_id"]),
                 effect_hash=effect_hash,
+                failure_category=failure_category,
+                action_parameters_hash=(
+                    str(row["action_parameters_hash"])
+                    if row["action_parameters_hash"] is not None
+                    else None
+                ),
             )
             cursor = connection.execute(
                 """
                 UPDATE executions
                 SET status = ?, completed_at = ?, result_code = ?, safe_summary = ?,
-                    effect_hash = ?, integrity_hash = ?
+                    failure_category = ?, effect_hash = ?, integrity_hash = ?
                 WHERE execution_id = ? AND status = 'CLAIMED'
                 """,
                 (
@@ -333,6 +366,7 @@ class SQLiteExecutionRepository(SQLiteApprovalRepository):
                     completed_text,
                     result_code.value,
                     safe_summary,
+                    failure_category.value if failure_category is not None else None,
                     effect_hash,
                     integrity_hash,
                     execution_id,
@@ -355,6 +389,7 @@ class SQLiteExecutionRepository(SQLiteApprovalRepository):
                 target,
                 now,
                 str(row["actor_id"]),
+                failure_category,
             )
             connection.commit()
             return _execution_from_row(self._required_execution(connection, execution_id))
@@ -436,6 +471,12 @@ class SQLiteExecutionRepository(SQLiteApprovalRepository):
             safe_summary=record.safe_summary,
             actor_id=record.actor_id,
             effect_hash=str(row["effect_hash"]) if row["effect_hash"] is not None else None,
+            failure_category=record.failure_category,
+            action_parameters_hash=(
+                str(row["action_parameters_hash"])
+                if row["action_parameters_hash"] is not None
+                else None
+            ),
         )
         effect_row = connection.execute(
             """
@@ -445,12 +486,18 @@ class SQLiteExecutionRepository(SQLiteApprovalRepository):
             (record.execution_id,),
         ).fetchone()
         effect_valid = _effect_is_valid(record, row, effect_row)
+        expected_parameters_hash = (
+            sha256_hex(canonical_json_bytes(approval.action_parameters.model_dump(mode="json")))
+            if approval.action_parameters is not None
+            else None
+        )
         if (
             not hmac.compare_digest(expected_hash, str(row["integrity_hash"]))
             or not effect_valid
             or record.approval_id != approval.approval_id
             or record.event_id != approval.event_id
             or record.action is not execution_action_for(approval.action)
+            or row["action_parameters_hash"] != expected_parameters_hash
         ):
             raise ExecutionIntegrityError
 
@@ -460,6 +507,7 @@ class SQLiteExecutionRepository(SQLiteApprovalRepository):
         approval_row: sqlite3.Row,
         now: datetime,
         actor_id: str,
+        failure_category: ExecutionFailureCategory | None = None,
     ) -> None:
         self._append_execution_event(
             connection,
@@ -482,6 +530,7 @@ class SQLiteExecutionRepository(SQLiteApprovalRepository):
         status: ExecutionStatus | str,
         now: datetime,
         actor_id: str,
+        failure_category: ExecutionFailureCategory | None = None,
     ) -> None:
         self._append_audit(
             connection,
@@ -494,6 +543,7 @@ class SQLiteExecutionRepository(SQLiteApprovalRepository):
             sequence_number=int(approval_row["audit_event_count"]) + 1,
             execution_id=execution_id,
             event_id=event_id,
+            failure_category=(failure_category.value if failure_category is not None else None),
         )
 
 
@@ -514,6 +564,8 @@ def _execution_hash(
     safe_summary: str | None,
     actor_id: str,
     effect_hash: str | None = None,
+    failure_category: ExecutionFailureCategory | None = None,
+    action_parameters_hash: str | None = None,
 ) -> str:
     return sha256_hex(
         canonical_json_bytes(
@@ -524,6 +576,10 @@ def _execution_hash(
                 "completed_at": completed_at,
                 "event_id": event_id,
                 "effect_hash": effect_hash,
+                "failure_category": (
+                    failure_category.value if failure_category is not None else None
+                ),
+                "action_parameters_hash": action_parameters_hash,
                 "execution_id": execution_id,
                 "result_code": result_code.value if result_code is not None else None,
                 "safe_summary": safe_summary,
@@ -548,6 +604,11 @@ def _execution_from_row(row: sqlite3.Row) -> ExecutionRecord:
         ),
         safe_summary=str(row["safe_summary"]) if row["safe_summary"] is not None else None,
         actor_id=str(row["actor_id"]),
+        failure_category=(
+            ExecutionFailureCategory(row["failure_category"])
+            if row["failure_category"] is not None
+            else None
+        ),
     )
 
 
@@ -560,7 +621,11 @@ def _effect_is_valid(
     if record.status is not ExecutionStatus.SUCCEEDED:
         return effect_row is None and stored_hash is None
     if effect_row is None or not isinstance(stored_hash, str):
-        return False
+        return (
+            effect_row is None
+            and isinstance(stored_hash, str)
+            and hmac.compare_digest(sha256_hex(canonical_json_bytes(None)), stored_hash)
+        )
     calculated = sha256_hex(
         canonical_json_bytes(
             {

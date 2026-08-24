@@ -2,6 +2,7 @@
 
 from enum import StrEnum
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -46,6 +47,9 @@ class Settings(BaseSettings):
         max_length=64,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
     )
+    ghl_api_key: SecretStr | None = None
+    ghl_api_version: Literal["v3"] = "v3"
+    ghl_timeout_seconds: float = Field(default=10.0, ge=1.0, le=30.0)
 
     @model_validator(mode="after")
     def require_production_ai_credentials(self) -> "Settings":

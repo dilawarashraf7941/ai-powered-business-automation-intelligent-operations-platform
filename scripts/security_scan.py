@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "src"
 FORBIDDEN_CALLS = {"eval", "exec", "compile", "__import__", "os.system"}
-FORBIDDEN_IMPORTS = {"subprocess", "requests", "httpx", "urllib", "importlib"}
+FORBIDDEN_IMPORTS = {"subprocess", "requests", "urllib", "importlib"}
 SECRET_PATTERN = re.compile(
     r"(?i)(api[_-]?key|password|secret|token)\s*=\s*['\"][A-Za-z0-9_\-/+=]{16,}['\"]"
 )
@@ -20,11 +20,18 @@ def scan_file(path: Path) -> list[str]:
     findings: list[str] = []
     text = path.read_text(encoding="utf-8")
     tree = ast.parse(text, filename=str(path))
+    allowed_httpx_path = SOURCE / "ai_business_automation" / "providers" / "ghl.py"
     for node in ast.walk(tree):
         if isinstance(node, ast.Import) and any(
             alias.name.split(".")[0] in FORBIDDEN_IMPORTS for alias in node.names
         ):
             findings.append(f"{path}: prohibited capability import")
+        if (
+            isinstance(node, ast.Import)
+            and any(alias.name == "httpx" for alias in node.names)
+            and path != allowed_httpx_path
+        ):
+            findings.append(f"{path}: httpx import outside GHL adapter")
         if isinstance(node, ast.ImportFrom):
             module_root = (node.module or "").split(".")[0]
             if module_root in FORBIDDEN_IMPORTS:

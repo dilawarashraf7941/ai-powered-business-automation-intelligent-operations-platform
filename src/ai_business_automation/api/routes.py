@@ -3,11 +3,12 @@
 import logging
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Path, Request, status
+from fastapi import APIRouter, Depends, Path, Request, Response, status
 from pydantic import BaseModel, ConfigDict
 
 from ai_business_automation.models import (
     ApprovalResponse,
+    ApprovalStatus,
     AuthenticatedActor,
     AuthRole,
     BusinessIntelligenceResult,
@@ -15,7 +16,11 @@ from ai_business_automation.models import (
     EmptyApprovalTransitionRequest,
     ExecutionAction,
     ExecutionResponse,
+    ExecutionStatus,
+    MetricName,
+    OperationalMetricSnapshot,
     PolicyDecision,
+    ReadinessStatus,
     RejectionRequest,
 )
 from ai_business_automation.models.events import EventAcknowledgement, ExternalEvent
@@ -77,6 +82,14 @@ class AdminStatusResponse(BaseModel):
     actor_role: AuthRole
     policy_version: str
     supported_actions: tuple[ExecutionAction, ...]
+    readiness: ReadinessStatus
+    metrics: OperationalMetricSnapshot
+
+
+class ReadinessResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    status: ReadinessStatus
 
 
 @router.get("/health", response_model=HealthResponse, tags=["health"])
@@ -86,8 +99,19 @@ async def health() -> HealthResponse:
     return HealthResponse(status="ok")
 
 
+@router.get("/ready", response_model=ReadinessResponse, tags=["health"])
+async def readiness(request: Request, response: Response) -> ReadinessResponse:
+    """Check bounded local persistence without consulting external providers."""
+
+    readiness_status: ReadinessStatus = request.app.state.readiness.status()
+    if readiness_status is ReadinessStatus.NOT_READY:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    return ReadinessResponse(status=readiness_status)
+
+
 @router.get("/api/v1/admin/status", response_model=AdminStatusResponse, tags=["admin"])
 async def admin_status(
+    request: Request,
     actor: Annotated[AuthenticatedActor, Depends(require_permission("admin"))],
 ) -> AdminStatusResponse:
     return AdminStatusResponse(
@@ -95,6 +119,8 @@ async def admin_status(
         actor_role=actor.role,
         policy_version=POLICY_VERSION,
         supported_actions=(ExecutionAction.ADD_CONTACT_TAG,),
+        readiness=request.app.state.readiness.status(),
+        metrics=request.app.state.metrics.snapshot(),
     )
 
 
@@ -163,6 +189,7 @@ async def decide_event(
     normalized = ingestion.ingest(event)
     analysis = await intelligence.analyze(normalized.event, normalized.category)
     result = policy.decide(normalized.event, analysis)
+    _record_policy_metric(request, result)
     _LOGGER.info(
         "policy_decision_returned",
         extra={
@@ -197,6 +224,8 @@ async def create_approval(
     normalized = ingestion.ingest(event)
     analysis = await intelligence.analyze(normalized.event, normalized.category)
     result = approvals.create(normalized.event, analysis, actor.actor_id).public()
+    request.app.state.metrics.increment(MetricName.POLICY_DECISIONS_APPROVAL)
+    request.app.state.metrics.increment(MetricName.APPROVALS_CREATED)
     _log_approval_response(request, result, "approval_created")
     return result
 
@@ -215,6 +244,8 @@ async def get_approval(
     approvals: Annotated[ApprovalService, Depends(get_approval_service)],
 ) -> ApprovalResponse:
     result = approvals.get(approval_id).public()
+    if result.status is ApprovalStatus.EXPIRED:
+        request.app.state.metrics.increment(MetricName.APPROVALS_EXPIRED)
     _log_approval_response(request, result, "approval_read")
     return result
 
@@ -235,6 +266,7 @@ async def approve_approval(
 ) -> ApprovalResponse:
     del transition
     result = approvals.approve(approval_id, actor.actor_id).public()
+    request.app.state.metrics.increment(MetricName.APPROVALS_APPROVED)
     _log_approval_response(request, result, "approval_approved")
     return result
 
@@ -254,6 +286,7 @@ async def reject_approval(
     approvals: Annotated[ApprovalService, Depends(get_approval_service)],
 ) -> ApprovalResponse:
     result = approvals.reject(approval_id, rejection.reason, actor.actor_id).public()
+    request.app.state.metrics.increment(MetricName.APPROVALS_REJECTED)
     _log_approval_response(request, result, "approval_rejected")
     return result
 
@@ -288,7 +321,19 @@ async def execute_action(
 ) -> ExecutionResponse:
     """Execute the one fixed contact-tag action bound to an approved record."""
 
-    result = executions.execute(execution_request, actor.actor_id).public()
+    request.app.state.metrics.increment(MetricName.EXECUTIONS_STARTED)
+    try:
+        result = executions.execute(execution_request, actor.actor_id).public()
+    except Exception:
+        request.app.state.metrics.increment(MetricName.EXECUTIONS_FAILED)
+        raise
+    execution_metric = {
+        ExecutionStatus.SUCCEEDED: MetricName.EXECUTIONS_SUCCEEDED,
+        ExecutionStatus.FAILED: MetricName.EXECUTIONS_FAILED,
+        ExecutionStatus.UNKNOWN: MetricName.EXECUTIONS_UNKNOWN,
+    }.get(result.status)
+    if execution_metric is not None:
+        request.app.state.metrics.increment(execution_metric)
     _log_execution_response(request, result, "execution_completed")
     return result
 
@@ -322,3 +367,12 @@ def _log_execution_response(request: Request, result: ExecutionResponse, event_n
             "outcome": "success",
         },
     )
+
+
+def _record_policy_metric(request: Request, result: PolicyDecision) -> None:
+    metric = {
+        "ALLOW": MetricName.POLICY_DECISIONS_ALLOW,
+        "REQUIRE_HUMAN_APPROVAL": MetricName.POLICY_DECISIONS_APPROVAL,
+        "DENY": MetricName.POLICY_DECISIONS_DENY,
+    }[result.decision.value]
+    request.app.state.metrics.increment(metric)

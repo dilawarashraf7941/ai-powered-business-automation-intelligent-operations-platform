@@ -9,6 +9,7 @@ from pathlib import Path
 
 from ai_business_automation.models import AuthenticatedActor, SecurityAuditEventType
 from ai_business_automation.repositories.approvals import SQLiteApprovalRepository
+from ai_business_automation.services.approval_errors import ApprovalPersistenceError
 from ai_business_automation.services.provenance import chained_audit_hash
 
 _GENESIS = "0" * 64
@@ -120,6 +121,32 @@ class SecurityAuditRepository:
             connection.commit()
         finally:
             connection.close()
+
+    def is_ready(self) -> bool:
+        """Verify bounded local schema access without exposing failure details."""
+
+        try:
+            self._initialize()
+            connection = sqlite3.connect(self._database_path, timeout=1.0)
+            try:
+                approval_schema = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'approvals'"
+                ).fetchone()
+                audit_state = connection.execute(
+                    "SELECT event_count, head_hash FROM security_audit_state WHERE singleton = 1"
+                ).fetchone()
+                return (
+                    approval_schema is not None
+                    and audit_state is not None
+                    and isinstance(audit_state[0], int)
+                    and audit_state[0] >= 0
+                    and isinstance(audit_state[1], str)
+                    and len(audit_state[1]) == 64
+                )
+            finally:
+                connection.close()
+        except (OSError, sqlite3.Error, ApprovalPersistenceError):
+            return False
 
     def verify(self) -> bool:
         self._initialize()

@@ -7,6 +7,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
 
+from ai_business_automation.models import FailureCategory
 from ai_business_automation.models.events import PayloadLimitError, UnsafePayloadError
 from ai_business_automation.providers import AIAnalysisError
 from ai_business_automation.security.auth import (
@@ -53,6 +54,7 @@ def error_response(request: Request, status: int, code: str, message: str) -> JS
                 "request_id": _request_id(request),
                 "operation": operation,
                 "error_category": code,
+                "failure_category": _failure_category(code).value,
                 "outcome": "rejected",
             },
         )
@@ -150,3 +152,23 @@ async def http_error_handler(request: Request, exc: HTTPException) -> JSONRespon
 
 async def unexpected_error_handler(request: Request, _exc: Exception) -> JSONResponse:
     return error_response(request, 500, "INTERNAL_ERROR", "An internal error occurred.")
+
+
+def _failure_category(code: str) -> FailureCategory:
+    if code in {"AUTHENTICATION_REQUIRED", "AUTHENTICATION_FAILED"}:
+        return FailureCategory.AUTHENTICATION_FAILURE
+    if code == "FORBIDDEN":
+        return FailureCategory.AUTHORIZATION_FAILURE
+    if code.startswith("AI_"):
+        return FailureCategory.AI_FAILURE
+    if code == "POLICY_VALIDATION_FAILED":
+        return FailureCategory.POLICY_FAILURE
+    if code in {"APPROVAL_UNAVAILABLE", "EXECUTION_UNAVAILABLE"}:
+        return FailureCategory.PERSISTENCE_FAILURE
+    if code.startswith("APPROVAL_") or code == "PROVENANCE_INTEGRITY_FAILURE":
+        return FailureCategory.APPROVAL_FAILURE
+    if code.startswith("EXECUTION_") or code.startswith("ACTION_"):
+        return FailureCategory.EXECUTION_FAILURE
+    if code in _ERROR_MESSAGES or code in {"INVALID_REQUEST", "REQUEST_TOO_LARGE"}:
+        return FailureCategory.VALIDATION_ERROR
+    return FailureCategory.INTERNAL_FAILURE

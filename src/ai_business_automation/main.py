@@ -38,6 +38,7 @@ from ai_business_automation.security.middleware import (
 from ai_business_automation.services.approval_errors import ApprovalError
 from ai_business_automation.services.execution_errors import ExecutionBoundaryError
 from ai_business_automation.services.normalization import EventNormalizationError
+from ai_business_automation.services.observability import LocalReadinessProbe, OperationalMetrics
 
 
 async def _validation_error_adapter(request: Request, exc: Exception) -> Response:
@@ -122,15 +123,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.state.rate_limiter = ProcessRateLimiter(
         active_settings.auth_failure_limit, active_settings.protected_mutation_limit
     )
-    application.state.security_audit = SecurityAuditRepository(
-        Path(active_settings.approval_database_path)
-    )
+    metrics = OperationalMetrics()
+    security_audit = SecurityAuditRepository(Path(active_settings.approval_database_path))
+    application.state.metrics = metrics
+    application.state.security_audit = security_audit
+    application.state.readiness = LocalReadinessProbe(security_audit)
     application.include_router(router)
     application.add_middleware(SafeExceptionMiddleware)
     application.add_middleware(
         RequestBodyLimitMiddleware, max_bytes=active_settings.max_request_body_bytes
     )
-    application.add_middleware(RequestContextMiddleware)
+    application.add_middleware(RequestContextMiddleware, metrics=metrics)
     return application
 
 

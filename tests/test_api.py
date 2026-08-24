@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import socket
 from builtins import open as builtin_open
 from collections.abc import Iterator
@@ -201,8 +202,7 @@ def test_server_owned_request_id_replaces_client_value(client: TestClient) -> No
     first_id = first.headers["X-Request-ID"]
     assert first_id != supplied
     assert first_id != second.headers["X-Request-ID"]
-    assert 20 <= len(first_id) <= 32
-    assert first_id.replace("-", "").replace("_", "").isalnum()
+    assert re.fullmatch(r"[0-9a-f]{32}", first_id)
 
 
 def test_security_headers_and_disabled_cors(client: TestClient) -> None:

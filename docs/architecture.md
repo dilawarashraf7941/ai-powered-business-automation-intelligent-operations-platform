@@ -1,8 +1,9 @@
 # Architecture
 
-Phase 6 extends trusted human approval with exactly one controlled external business mutation.
+Phase 8 adds bounded observability and operational safety without expanding the Phase 7
+authentication boundary or the single controlled external mutation.
 
-## Phase 6 shape
+## Phase 8 shape
 
 The project uses a compact `src` layout with responsibilities split by boundary:
 
@@ -10,13 +11,13 @@ The project uses a compact `src` layout with responsibilities split by boundary:
 | --- | --- |
 | `main.py` | Application construction and explicit middleware/handler registration |
 | `api/` | HTTP routes and stable public error contracts |
-| `models/` | Strict events, intelligence, policy, approval, execution, and action schemas |
-| `services/` | Advisory analysis, policy, approval, and fixed allowlisted action handlers |
+| `models/` | Strict business schemas plus closed observability enums and snapshots |
+| `services/` | Business services, fixed action handler, local readiness, and fixed metrics |
 | `providers/` | Isolated OpenAI analysis and single-operation GHL adapters |
 | `repositories/` | Provider-neutral approval/execution contracts and transactional SQLite adapters |
 | `config/` | Validated server-owned settings |
-| `logging/` | Allowlisted JSON log serialization and reusable redaction |
-| `security/` | Request-size enforcement, correlation IDs, and response headers |
+| `logging/` | Async request context, allowlisted JSON logs, and bounded recursive redaction |
+| `security/` | Authentication, request limits, correlation, metrics timing, and safe headers |
 
 ## API boundary
 
@@ -25,8 +26,33 @@ random request ID and then reads at most the configured request-body ceiling. Fa
 body that has already passed this limit. Pydantic then validates the event envelope and recursively
 checks its payload. Routes receive validated models rather than raw dictionaries.
 
-The health route is deliberately isolated from external resources. It proves only that the process
-can serve a response.
+The health route is deliberately isolated from all resources. Readiness checks only local SQLite
+schema accessibility through the repository boundary. Neither route consults OpenAI or GHL.
+
+## Observability boundary
+
+`RequestContextMiddleware` generates 128 random bits rendered as exactly 32 lowercase hexadecimal
+characters. It ignores client `X-Request-ID`, stores the authoritative value in request state and an
+async-safe context variable, returns it in the response, and records it in safe logs and errors.
+Successful authentication adds only the server-derived actor ID and closed role to that context;
+credential material never enters it.
+
+The JSON formatter accepts only a closed field allowlist and safe event-name syntax. Recursive
+redaction has bounded depth, field count, sequence length, key length, and scalar length. The final
+serialized record is capped at 4 KiB. Logs do not include bodies, customer text, prompts, model or
+provider output, headers, cookies, secrets, paths, arbitrary URLs, or ordinary exception traces.
+
+`OperationalMetrics` allocates one counter for each member of a fixed enum and one latency
+aggregate. Counters and totals saturate at a fixed integer ceiling; latency is clamped and stores
+only count, total, minimum, and maximum. There are no dynamic keys or labels. Metrics reset on
+process restart and are neither durable nor cross-worker aggregates.
+
+`GET /api/v1/admin/status` remains `ADMIN`-only. It returns only closed status, policy version,
+`ADD_CONTACT_TAG`, authenticated role, readiness, and the fixed metrics snapshot. Observability has
+no dependency on the executor and grants no permission.
+
+**OBSERVABILITY NEVER AUTHORIZES ACTIONS. HEALTH/READINESS NEVER CALL EXTERNAL PROVIDERS. METRICS
+NEVER CONTAIN CUSTOMER DATA.**
 
 ## Untrusted event boundary
 

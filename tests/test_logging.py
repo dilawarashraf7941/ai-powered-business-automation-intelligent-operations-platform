@@ -26,7 +26,7 @@ def test_formatter_uses_allowlist_and_bounds_fields() -> None:
     record.request_id = "r" * 200
     record.untrusted_payload = "must-not-appear"
     result = json.loads(JsonFormatter().format(record))
-    assert len(result["event"]) == 128
+    assert result["event"] == "unclassified_event"
     assert len(result["request_id"]) == 128
     assert "untrusted_payload" not in result
     assert result["level"] == "INFO"

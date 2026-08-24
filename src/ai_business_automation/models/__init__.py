@@ -46,6 +46,13 @@ from ai_business_automation.models.intelligence import (
     RecommendedNextStep,
     Urgency,
 )
+from ai_business_automation.models.observability import (
+    FailureCategory,
+    LatencyMetrics,
+    MetricName,
+    OperationalMetricSnapshot,
+    ReadinessStatus,
+)
 from ai_business_automation.models.policy import (
     DEFAULT_CONFIDENCE_THRESHOLD,
     MAX_POLICY_EVIDENCE,
@@ -93,14 +100,19 @@ __all__ = [
     "ExecutionResponse",
     "ExecutionStatus",
     "ExternalEvent",
+    "FailureCategory",
     "GHLAddContactTagParameters",
     "GHLAddTagsRequest",
     "Intent",
     "InternalEventMetadata",
+    "LatencyMetrics",
+    "MetricName",
+    "OperationalMetricSnapshot",
     "PolicyDecision",
     "PolicyEvidence",
     "Priority",
     "ProviderAnalysisOutput",
+    "ReadinessStatus",
     "RecommendedAction",
     "RecommendedNextStep",
     "RejectionRequest",

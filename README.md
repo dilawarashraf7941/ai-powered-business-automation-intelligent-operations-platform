@@ -1,6 +1,6 @@
 # AI-Powered Business Automation & Intelligent Operations Platform
 
-This repository contains the secure Phase 6 controlled execution boundary for a business
+This repository contains the secure Phase 8 operational-safety boundary for a business
 automation and intelligent operations platform. It normalizes bounded events, obtains strictly
 validated advisory AI analysis, evaluates deterministic policy, and records approval-required
 decisions before allowing one narrowly scoped external mutation.
@@ -19,11 +19,12 @@ decisions before allowing one narrowly scoped external mutation.
 >
 > **The provider adapter performs one fixed external mutation.**
 
-## Current Phase 6 scope
+## Current Phase 8 scope
 
 - Python 3.12 project using a `src` layout
 - Strict environment configuration through `APP_` variables
-- Lightweight unauthenticated health check
+- Lightweight public liveness and local-only readiness checks
+- Server-configured bearer authentication with closed role-based authorization
 - Closed event/source taxonomies and strict, bounded external-event validation
 - UTC normalization, server event identity, and deterministic event classification
 - Canonical sorted UTF-8 serialization with an 8 KiB internal ceiling
@@ -40,7 +41,9 @@ decisions before allowing one narrowly scoped external mutation.
 - Approval provenance commits to canonical contact ID and tag parameters
 - Stable provider failure categories with a 1–60 second timeout range and no retries
 - 16 KiB request-body ceiling enforced before framework body parsing
-- Safe JSON request-completion logs and server-generated correlation IDs
+- Bounded allowlisted JSON logs and fixed 32-hex server-generated correlation IDs
+- Recursive bounded redaction, closed failure categories, and fixed process-local metrics
+- Aggregate request latency without per-request history or dynamic metric labels
 - Sanitized, stable API errors and defensive response headers
 - Automated tests, security source scan, static analysis, dependency audit, and CI
 
@@ -64,6 +67,19 @@ Returns only:
 ```json
 {"status": "ok"}
 ```
+
+This public liveness route performs no database or provider call.
+
+### `GET /ready`
+
+Returns `{"status":"ready"}` only when the bounded local SQLite schema check succeeds, otherwise
+HTTP 503 with `{"status":"not_ready"}`. It never calls OpenAI, GHL, or another external service.
+
+### `GET /api/v1/admin/status`
+
+Requires the `ADMIN` role and returns only application status, policy version, the single supported
+action, authenticated role, readiness, fixed counters, and aggregate request latency. It never
+returns configuration, paths, secrets, provider content, customer data, or raw logs.
 
 ### `POST /api/v1/events`
 
@@ -218,6 +234,29 @@ and supplies no tool, function, web-search, code-interpreter, conversation, or a
 configuration. Prompt injection remains an adversarial risk; isolation, bounded input, structured
 output, and the complete absence of action/tool capabilities reduce its impact.
 
+## Observability and operational safety
+
+Every request receives a cryptographically random 32-character lowercase hexadecimal
+`X-Request-ID`. Client correlation headers are always replaced. An async-safe internal request
+context carries only that ID and, after authentication, the server-derived actor ID and role.
+
+Application logs are compact JSON built from an allowlist. Event names, field count, nesting,
+sequence length, individual values, and total serialized size are bounded. Recursive redaction
+recognizes authorization, cookie, API-key, token, password, secret, and credential keys at every
+supported nesting level. Request bodies, customer text, AI prompts/output, provider responses,
+credentials, arbitrary URLs, exception traces, and filesystem/database paths are excluded.
+
+Metrics use a fixed closed enum of saturating counters plus one latency aggregate containing count,
+total, minimum, and maximum. They have no labels and never use customer, event, approval, actor, or
+URL values. Metrics are process-local, reset on restart, and are not a durable monitoring system.
+No Prometheus, OpenTelemetry, StatsD, Redis, or other monitoring dependency is present.
+
+**OBSERVABILITY NEVER AUTHORIZES ACTIONS.**
+
+**HEALTH/READINESS NEVER CALL EXTERNAL PROVIDERS.**
+
+**METRICS NEVER CONTAIN CUSTOMER DATA.**
+
 ## Local setup
 
 ```bash
@@ -272,11 +311,16 @@ while excluding request/response bodies and secrets.
 
 ## Current limitations
 
-Phase 6 intentionally has no real authentication, queue, workflow engine, tool calling, AI memory,
-autonomous action selection, n8n integration, or other CRM mutation. SQLite persists approval,
+Phase 8 uses server-configured static bearer credentials rather than an external identity provider.
+It has no queue, workflow engine, tool calling, AI memory, autonomous action selection, n8n
+integration, or other CRM mutation. SQLite persists approval,
 execution, audit, and action-parameter commitments; business
 events and AI content are not stored. Execution is single-process and there is no distributed lock,
 retry worker, reconciliation process, or external provider delivery guarantee.
+
+Operational metrics are process-local, reset when the process restarts, and do not aggregate across
+workers. Readiness verifies local SQLite schema access only; it is not an external-provider health
+signal.
 
 ## Roadmap
 

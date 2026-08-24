@@ -9,7 +9,13 @@ from typing import Literal
 from fastapi import Request
 
 from ai_business_automation.config import Settings
-from ai_business_automation.models import AuthenticatedActor, AuthRole, SecurityAuditEventType
+from ai_business_automation.logging import bind_authenticated_actor
+from ai_business_automation.models import (
+    AuthenticatedActor,
+    AuthRole,
+    MetricName,
+    SecurityAuditEventType,
+)
 
 _MAX_TOKEN_LENGTH = 256
 type Permission = Literal["read", "analysis", "approval", "execution", "admin"]
@@ -124,6 +130,7 @@ def require_permission(permission: Permission):  # type: ignore[no-untyped-def]
         try:
             actor = authenticator.authenticate(request.headers.getlist("authorization"))
         except AuthenticationError:
+            request.app.state.metrics.increment(MetricName.AUTHENTICATION_FAILURE)
             limiter.consume("authentication")
             audit.append(
                 SecurityAuditEventType.AUTHENTICATION_FAILED,
@@ -132,6 +139,8 @@ def require_permission(permission: Permission):  # type: ignore[no-untyped-def]
                 outcome="failure",
             )
             raise
+        request.app.state.metrics.increment(MetricName.AUTHENTICATION_SUCCESS)
+        bind_authenticated_actor(request.state.request_context, actor.actor_id, actor.role.value)
         audit.append(
             SecurityAuditEventType.AUTHENTICATION_SUCCEEDED,
             actor=actor,

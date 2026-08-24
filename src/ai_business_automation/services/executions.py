@@ -10,6 +10,7 @@ from ai_business_automation.models import (
     ExecutionFailureCategory,
     ExecutionRecord,
     ExecutionStatus,
+    FailureCategory,
     GHLAddContactTagParameters,
 )
 from ai_business_automation.providers import (
@@ -30,6 +31,15 @@ _FAILURE_MAP = {
     GHLFailureCategory.TIMEOUT: ExecutionFailureCategory.PROVIDER_TIMEOUT,
     GHLFailureCategory.PROVIDER_ERROR: ExecutionFailureCategory.PROVIDER_ERROR,
     GHLFailureCategory.UNKNOWN: ExecutionFailureCategory.UNKNOWN_OUTCOME,
+}
+_OBSERVABILITY_FAILURE_MAP = {
+    ExecutionFailureCategory.PROVIDER_AUTHENTICATION: FailureCategory.GHL_AUTHENTICATION,
+    ExecutionFailureCategory.PROVIDER_RATE_LIMIT: FailureCategory.GHL_RATE_LIMIT,
+    ExecutionFailureCategory.PROVIDER_BAD_REQUEST: FailureCategory.GHL_BAD_REQUEST,
+    ExecutionFailureCategory.PROVIDER_UNAVAILABLE: FailureCategory.GHL_UNAVAILABLE,
+    ExecutionFailureCategory.PROVIDER_TIMEOUT: FailureCategory.GHL_TIMEOUT,
+    ExecutionFailureCategory.PROVIDER_ERROR: FailureCategory.EXECUTION_FAILURE,
+    ExecutionFailureCategory.UNKNOWN_OUTCOME: FailureCategory.EXECUTION_FAILURE,
 }
 
 
@@ -84,19 +94,22 @@ class ExecutionService:
 
     @staticmethod
     def _log(event_name: str, record: ExecutionRecord) -> None:
+        extra = {
+            "execution_id": record.execution_id,
+            "approval_id": record.approval_id,
+            "event_id": record.event_id,
+            "action": record.action.value,
+            "status": record.status.value,
+            "outcome": "completed",
+            "error_category": (
+                record.failure_category.value if record.failure_category is not None else "NONE"
+            ),
+        }
+        if record.failure_category is not None:
+            extra["failure_category"] = _OBSERVABILITY_FAILURE_MAP[record.failure_category].value
         _LOGGER.info(
             event_name,
-            extra={
-                "execution_id": record.execution_id,
-                "approval_id": record.approval_id,
-                "event_id": record.event_id,
-                "action": record.action.value,
-                "status": record.status.value,
-                "outcome": "completed",
-                "error_category": (
-                    record.failure_category.value if record.failure_category is not None else "NONE"
-                ),
-            },
+            extra=extra,
         )
 
 

@@ -18,7 +18,7 @@ from ai_business_automation.api.routes import get_approval_service, get_executio
 from ai_business_automation.config import Environment, Settings
 from ai_business_automation.logging import JsonFormatter, redact
 from ai_business_automation.main import create_app
-from ai_business_automation.models import AuthRole, ExecutionAction, ExecutionStatus
+from ai_business_automation.models import AuthRole, ExecutionAction, ExecutionStatus, MetricName
 from ai_business_automation.repositories.security_audit import SecurityAuditRepository
 from ai_business_automation.security.auth import (
     AuthenticationError,
@@ -185,6 +185,17 @@ def test_admin_status_is_bounded_and_not_cached() -> None:
         "actor_role": "ADMIN",
         "policy_version": "1.0",
         "supported_actions": ["ADD_CONTACT_TAG"],
+        "readiness": "ready",
+        "metrics": {
+            **{name.value: 0 for name in MetricName},
+            "authentication_success": 1,
+            "request_latency": {
+                "count": 0,
+                "total_ms": 0,
+                "minimum_ms": 0,
+                "maximum_ms": 0,
+            },
+        },
     }
     assert response.headers["Cache-Control"] == "no-store"
     assert response.headers["Pragma"] == "no-cache"

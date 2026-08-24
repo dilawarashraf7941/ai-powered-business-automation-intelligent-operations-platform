@@ -29,8 +29,8 @@ they are not a substitute for authorization in later phases.
 `occurred_at` must be a bounded ISO-8601 string with an explicit numeric offset. Naive, malformed,
 more-than-365-day-old, and more-than-five-minute-future values are rejected. Accepted times and the
 server-generated `received_at` are stored in UTC. Canonical JSON has sorted keys, deterministic enum
-and datetime rendering, UTF-8 encoding, and an 8 KiB output limit. Phase 4 creates no signatures,
-hashes, or provenance claims.
+and datetime rendering, UTF-8 encoding, and an 8 KiB output limit. Event acknowledgements make no
+signature or provenance claim; Phase 5 separately creates server-owned approval provenance hashes.
 
 ## Request size handling
 
@@ -41,7 +41,8 @@ FastAPI or Pydantic parses them. The setting is bounded from 1 KiB to 1 MiB; the
 ## Configuration and secrets
 
 Settings use `pydantic-settings`, require the `APP_` prefix, and validate environment, log level,
-body, AI, and policy-threshold limits. The confidence threshold is server-owned and bounded from
+body, AI, policy-threshold, approval TTL, database path, and development approver limits. The
+confidence threshold is server-owned and bounded from
 zero through one. The OpenAI key uses `SecretStr`, is mandatory in production, and is omitted from
 the example environment file. `.env` is ignored and must not be tracked. Settings and secrets are
 never returned from an endpoint or written to logs.
@@ -79,10 +80,11 @@ allowlist; wildcard CORS is not acceptable.
 ## Excluded dangerous capabilities
 
 Production code contains no dynamic evaluation, shell or subprocess access, arbitrary imports,
-generic HTTP client, client-controlled URL construction, persistence adapter, external business
-integration, workflow runner, or autonomous action facility. The isolated OpenAI adapter is the
-only outbound provider boundary. A focused AST-based security scan and tests guard these Phase 4
-exclusions. No event is persisted, deduplicated, queued, or processed in the background.
+generic HTTP client, client-controlled URL construction, external business integration, workflow
+runner, or autonomous action facility. Persistence is confined to the approval repository and
+contains no event content. The isolated OpenAI adapter is the only outbound provider boundary. A
+focused AST-based security scan and tests guard these Phase 5 exclusions. No event is persisted,
+deduplicated, queued, or processed in the background.
 
 ## AI input and prompt-injection controls
 
@@ -146,4 +148,42 @@ Policy logs contain only allowlisted request/event identifiers, decision, action
 version, event type, and outcome. They exclude events, payloads, customer text, AI content, headers,
 credentials, and secrets.
 
-**AI recommends. Policy decides. Execution is a separate future boundary.**
+**AI recommends. Policy decides. Human approves. Execution is a separate future boundary.**
+
+## Approval persistence security
+
+The approval API accepts the strict external-event model for creation and recomputes policy. Path
+approval IDs use a closed random-ID syntax; transition bodies reject approver IDs, timestamps,
+expiry, policy fields, evidence, and hashes. Rejection reasons are nonblank and limited to 500
+characters, with control characters, credential patterns, URLs, code fences, and command-like text
+rejected. Complete rejection reasons are never logged or returned.
+
+The database path is a bounded server setting ending in `.sqlite3`; absolute paths, drive-qualified
+paths, parent traversal, and client paths are rejected. The adapter never creates parent directories.
+Database values use SQL parameters. Connections enable foreign keys, WAL mode, a five-second busy
+timeout, explicit transactions, bounded column checks, and deterministic cleanup.
+
+## Approval integrity and concurrency
+
+Before approval or rejection, the repository verifies audit integrity, recomputes the provenance
+hash, checks event identity/type/source, policy version, decision, action, risk, confidence, and
+evidence consistency, then verifies that the decision remains `REQUIRE_HUMAN_APPROVAL`. Any failure
+returns a stable error without SQL details or filesystem paths.
+
+`BEGIN IMMEDIATE` serializes writers. State changes are conditional on `PENDING`, affected-row count
+must equal one, and expiry is checked in the same transaction. Invalid terminal transitions append
+a safe rejected-transition audit event but never alter approval status. Reads persist expiration.
+
+Audit events contain only random audit/approval IDs, closed event/status types, bounded actor ID,
+server time, sequence, and SHA-256 links. The approval row commits to the event count and chain head.
+The verifier detects modified, missing, reordered, duplicate, or disconnected events.
+
+SQLite append-only behavior is application-enforced. It is not database-level immutable storage,
+not a blockchain, and not an external tamper-proof ledger. The unkeyed SHA-256 chain provides
+tamper evidence against accidental or unsophisticated modification; an attacker able to rewrite all
+database rows and recompute every hash is outside this phase's guarantees.
+
+`APP_APPROVER_ID` is a development/server-configured actor label, not authenticated identity. Phase
+5 has no login, session, identity provider, authorization system, approval UI, or execution token.
+`APPROVED` records state only that the configured development actor approved the recommendation;
+they execute nothing.

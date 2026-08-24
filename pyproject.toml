@@ -46,6 +46,7 @@ exclude_also = ["if TYPE_CHECKING:", "if __name__ == .__main__.:"]
 target-version = "py312"
 line-length = 100
 src = ["src", "tests"]
+extend-exclude = ["/release-*/"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "S", "SIM", "RUF"]

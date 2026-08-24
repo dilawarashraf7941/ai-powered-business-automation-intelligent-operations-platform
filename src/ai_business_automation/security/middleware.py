@@ -175,4 +175,16 @@ def _operation_name(method: str, path: str) -> str:
         ("POST", "/api/v1/events/analyze"): "analyze_event",
         ("POST", "/api/v1/events/decide"): "decide_event",
     }
-    return known.get((method, path), "unmatched_route")
+    operation = known.get((method, path))
+    if operation is not None:
+        return operation
+    if path == "/api/v1/approvals" and method == "POST":
+        return "create_approval"
+    if path.startswith("/api/v1/approvals/"):
+        if method == "GET":
+            return "read_approval"
+        if method == "POST" and path.endswith("/approve"):
+            return "approve_approval"
+        if method == "POST" and path.endswith("/reject"):
+            return "reject_approval"
+    return "unmatched_route"

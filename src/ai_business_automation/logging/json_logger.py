@@ -32,6 +32,8 @@ _ALLOWED_EXTRA = (
     "action",
     "risk",
     "policy_version",
+    "approval_id",
+    "status",
 )
 
 

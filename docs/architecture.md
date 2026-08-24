@@ -1,9 +1,8 @@
 # Architecture
 
-Phase 4 adds deterministic policy evaluation after advisory structured analysis. No action is
-executed.
+Phase 5 adds trusted human approval recording after deterministic policy. No action is executed.
 
-## Phase 4 shape
+## Phase 5 shape
 
 The project uses a compact `src` layout with responsibilities split by boundary:
 
@@ -14,6 +13,7 @@ The project uses a compact `src` layout with responsibilities split by boundary:
 | `models/` | Strict events, intelligence, policy results, and closed taxonomies |
 | `services/` | Normalization, advisory analysis, and pure deterministic policy |
 | `providers/` | Provider protocol, stable failures, and isolated OpenAI adapter |
+| `repositories/` | Provider-neutral approval contract and transactional SQLite adapter |
 | `config/` | Validated server-owned settings |
 | `logging/` | Allowlisted JSON log serialization and reusable redaction |
 | `security/` | Request-size enforcement, correlation IDs, and response headers |
@@ -47,9 +47,10 @@ Canonical JSON uses sorted keys, compact separators, UTF-8, and an 8 KiB ceiling
 or hashed in Phase 2. `EventClassifier` then maps the closed event enum to the closed `CUSTOMER`,
 `COMMERCE`, `SUPPORT`, `INTERNAL`, or `SYSTEM` category enum.
 
-The response exposes only acknowledgement fields. There are no repositories, queues, outbound
-clients, dynamic dispatchers, background workers, interpreters, or in-memory deduplication stores.
-Durable event storage, idempotency, provenance, and processing remain future boundaries.
+The event response exposes only acknowledgement fields. There are no event repositories, queues,
+generic outbound clients, dynamic dispatchers, background workers, interpreters, or in-memory
+deduplication stores. Durable business-event storage, idempotency, and processing remain future
+boundaries; the approval repository added in Phase 5 stores no event content.
 
 ## Advisory AI boundary
 
@@ -87,8 +88,34 @@ priority, high urgency, unknown intent, and `CONTACT_HUMAN`, `REQUEST_INFORMATIO
 `SCHEDULE_CONSULTATION`, or `NURTURE` require human approval. Clean `NONE` and low-risk `REVIEW`
 produce `ALLOW`. `ESCALATE` and high signals elevate risk deterministically.
 
-`ALLOW` is a policy result, not an execution command. Human approval persistence, action execution,
-workflow, integration, persistence, and automation layers remain absent.
+`ALLOW` is a policy result, not an execution command. Action execution, workflow, integration, and
+automation layers remain absent; Phase 5 adds only bounded human-approval persistence.
+
+## Human approval boundary
+
+`POST /api/v1/approvals` accepts only `ExternalEvent`. It reuses ingestion and intelligence, then
+`ApprovalService` calls the existing `PolicyDecisionService`; no client policy result is trusted.
+Only `REQUIRE_HUMAN_APPROVAL` is persisted. The service owns random approval identity, creation and
+expiry times, policy fields, provenance, TTL, and the configured development approver identity.
+
+The lifecycle is closed: `PENDING` may become `APPROVED`, `REJECTED`, or `EXPIRED`; every terminal
+state is final. Reads atomically persist expiration. Approval and rejection transitions perform
+integrity validation inside `BEGIN IMMEDIATE`, then use `UPDATE ... WHERE approval_id = ? AND
+status = 'PENDING'` and require one affected row. This serializes concurrent SQLite writers and
+prevents double decisions and expiry races.
+
+The provenance builder canonicalizes the full validated event and intelligence separately and
+stores only their SHA-256 digest commitments. A second canonical safe object binds those digests to
+event type/source, confidence, policy version, decision, action, risk, and evidence; its SHA-256 is
+the stored provenance hash. Transitions recompute the safe hash and compare every stored policy
+field. Payloads, AI summaries/reasons, prompts, headers, and credentials are never persisted.
+
+Each creation, transition, expiry, and rejected transition appends an audit event. Event hashes are
+`SHA-256(canonical event bytes + previous hash)`; the first event uses 64 zero characters. Sequence,
+previous hash, event hash, unique audit ID, stored count, and stored head are verified together by
+an internal service before authorization.
+
+**AI recommends. Policy decides. Human approves. Execution is a separate future boundary.**
 
 ## Future AI evolution
 

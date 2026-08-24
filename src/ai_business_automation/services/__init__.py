@@ -1,5 +1,6 @@
 """Side-effect-free normalization and classification services."""
 
+from ai_business_automation.services.approvals import ApprovalService
 from ai_business_automation.services.classification import EventClassifier
 from ai_business_automation.services.events import EventIngestionService, IngestionResult
 from ai_business_automation.services.intelligence import BusinessIntelligenceService
@@ -11,6 +12,7 @@ from ai_business_automation.services.policy import (
 )
 
 __all__ = [
+    "ApprovalService",
     "BusinessIntelligenceService",
     "DeterministicPolicyEngine",
     "EventClassifier",

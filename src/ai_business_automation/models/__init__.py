@@ -1,5 +1,18 @@
 """Validated API models."""
 
+from ai_business_automation.models.approvals import (
+    GENESIS_AUDIT_HASH,
+    MAX_APPROVAL_EVIDENCE,
+    MAX_REJECTION_REASON_LENGTH,
+    ApprovalRecord,
+    ApprovalResponse,
+    ApprovalStatus,
+    AuditEvent,
+    AuditEventType,
+    EmptyApprovalTransitionRequest,
+    RejectionRequest,
+    TrustedProvenance,
+)
 from ai_business_automation.models.events import (
     CanonicalBusinessEvent,
     EventAcknowledgement,
@@ -31,12 +44,21 @@ from ai_business_automation.models.taxonomy import EventCategory, EventSource, E
 
 __all__ = [
     "DEFAULT_CONFIDENCE_THRESHOLD",
+    "GENESIS_AUDIT_HASH",
     "MAX_AI_OUTPUT_BYTES",
+    "MAX_APPROVAL_EVIDENCE",
     "MAX_POLICY_EVIDENCE",
+    "MAX_REJECTION_REASON_LENGTH",
     "POLICY_VERSION",
+    "ApprovalRecord",
+    "ApprovalResponse",
+    "ApprovalStatus",
+    "AuditEvent",
+    "AuditEventType",
     "BusinessIntelligenceResult",
     "CanonicalBusinessEvent",
     "DecisionOutcome",
+    "EmptyApprovalTransitionRequest",
     "EventAcknowledgement",
     "EventCategory",
     "EventSource",
@@ -52,6 +74,8 @@ __all__ = [
     "ProviderAnalysisOutput",
     "RecommendedAction",
     "RecommendedNextStep",
+    "RejectionRequest",
     "RiskLevel",
+    "TrustedProvenance",
     "Urgency",
 ]

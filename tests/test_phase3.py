@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr, ValidationError
+from tests.auth_helpers import authenticated_client
 
 import ai_business_automation.providers.openai as openai_module
 from ai_business_automation.api.routes import get_intelligence_service
@@ -97,7 +98,7 @@ def analysis_client() -> Iterator[tuple[TestClient, FakeProvider]]:
     service = BusinessIntelligenceService(provider, max_input_bytes=8_192, max_output_tokens=800)
     app = create_app(Settings(environment=Environment.TEST))
     app.dependency_overrides[get_intelligence_service] = lambda: service
-    with TestClient(app) as client:
+    with authenticated_client(app) as client:
         yield client, provider
 
 
@@ -177,7 +178,7 @@ def test_provider_receives_only_bounded_canonical_event_data(
     response = client.post(
         "/api/v1/events/analyze",
         json=analysis_event(payload={"message_text": injection}),
-        headers={"Authorization": "Bearer never-forward", "Cookie": "session=never-forward"},
+        headers={"Cookie": "session=never-forward"},
     )
     assert response.status_code == 200
     request = provider.requests[0]
@@ -224,7 +225,7 @@ def test_stable_provider_failure_handling(error: Exception, code: str, status_co
 
 def test_unconfigured_provider_has_deterministic_no_network_fallback() -> None:
     app = create_app(Settings(environment=Environment.TEST))
-    with TestClient(app) as client:
+    with authenticated_client(app) as client:
         response = client.post("/api/v1/events/analyze", json=analysis_event())
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "AI_CONFIGURATION"
@@ -392,7 +393,7 @@ def _client_with_provider(provider: FakeProvider) -> TestClient:
     service = BusinessIntelligenceService(provider, max_input_bytes=8_192, max_output_tokens=800)
     app = create_app(Settings(environment=Environment.TEST))
     app.dependency_overrides[get_intelligence_service] = lambda: service
-    return TestClient(app)
+    return authenticated_client(app)
 
 
 def _openai_provider_with(responses: FakeResponses) -> OpenAIAnalysisProvider:

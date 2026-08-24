@@ -55,6 +55,7 @@ from ai_business_automation.services.provenance import (
     build_trusted_provenance,
     provenance_hash,
 )
+from tests.auth_helpers import authenticated_client
 
 FIXED_NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
 EVENT_ID = "evt_fixed_server_identity"
@@ -196,7 +197,7 @@ def approval_client(
     app = create_app(Settings(environment=Environment.TEST))
     app.dependency_overrides[get_approval_service] = lambda: approval_service
     app.dependency_overrides[get_intelligence_service] = lambda: intelligence_service
-    with TestClient(app) as client:
+    with authenticated_client(app) as client:
         yield client, provider, approval_service, database, clock
 
 
@@ -664,7 +665,7 @@ def test_api_read_approve_and_reject_lifecycles(
     approved = client.post(f"/api/v1/approvals/{first}/approve")
     assert approved.status_code == 200
     assert approved.json()["status"] == "APPROVED"
-    assert approved.json()["approver_id"] == "development-approver"
+    assert approved.json()["approver_id"] == "test-admin"
 
     second = client.post("/api/v1/approvals", json=external_api_event()).json()["approval_id"]
     rejected = client.post(
@@ -735,7 +736,7 @@ def test_ai_failure_creates_no_approval_and_preserves_request_id(
     app = create_app(Settings(environment=Environment.TEST))
     app.dependency_overrides[get_approval_service] = lambda: approval_service
     app.dependency_overrides[get_intelligence_service] = lambda: intelligence_service
-    with TestClient(app) as client:
+    with authenticated_client(app) as client:
         response = client.post("/api/v1/approvals", json=external_api_event())
     assert response.status_code == 504
     assert response.json()["error"]["request_id"] == response.headers["X-Request-ID"]

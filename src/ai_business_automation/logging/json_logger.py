@@ -15,6 +15,7 @@ _SENSITIVE_FRAGMENTS = (
     "api_key",
     "apikey",
     "credential",
+    "bearer",
 )
 _ALLOWED_EXTRA = (
     "request_id",
@@ -36,6 +37,8 @@ _ALLOWED_EXTRA = (
     "status",
     "execution_id",
     "result_code",
+    "actor_id",
+    "role",
 )
 
 

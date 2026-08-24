@@ -32,9 +32,9 @@ class ExecutionService:
     actor_id: str
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
 
-    def execute(self, approval_id: str) -> ExecutionRecord:
+    def execute(self, approval_id: str, actor_id: str | None = None) -> ExecutionRecord:
         now = _utc(self.clock())
-        claimed, approval = self.repository.claim(approval_id, now, self.actor_id)
+        claimed, approval = self.repository.claim(approval_id, now, actor_id or self.actor_id)
         self._log("execution_claimed", claimed, "claimed")
         context = ActionContext(
             execution_id=claimed.execution_id,

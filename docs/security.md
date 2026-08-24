@@ -183,9 +183,9 @@ not a blockchain, and not an external tamper-proof ledger. The unkeyed SHA-256 c
 tamper evidence against accidental or unsophisticated modification; an attacker able to rewrite all
 database rows and recompute every hash is outside this phase's guarantees.
 
-`APP_APPROVER_ID` is a development/server-configured actor label, not authenticated identity. Phase
-6 has no login, session, identity provider, authorization system, or approval UI. Approval alone
-does not perform an action; the separate execution service must validate and atomically claim it.
+`APP_APPROVER_ID` remains only a backward-compatible direct-service development label. Protected
+HTTP approval operations use the actor derived by Phase 9 authentication. Approval alone does not
+perform an action; the separately authorized execution service must validate and atomically claim it.
 
 ## Controlled execution security
 
@@ -240,9 +240,9 @@ characters. URLs, credential-like strings, shell/control content, whitespace tri
 outcomes, and unknown fields are rejected. The client cannot provide actor, timestamp, execution,
 approval, event, action, contact, tags, provider, status, or commitment data.
 
-The server uses only the bounded `APP_RECONCILER_ID` label. This label is not authentication and
-does not prove a human identity; access control must be supplied by the deployment until a real
-identity system is implemented. No client identity header grants reconciliation authority.
+Protected reconciliation uses only an authenticated `EXECUTOR` or `ADMIN` actor. The bounded
+`APP_RECONCILER_ID` label remains a backward-compatible fallback for direct service calls and is
+superseded at the HTTP boundary. No client-supplied actor or role grants reconciliation authority.
 
 Reconciliation verifies every existing trust commitment before a conditional `UNKNOWN` transition.
 The sanitized reason is persisted for operational evidence but is absent from responses and logs.
@@ -257,3 +257,36 @@ replay. Exactly one execution and one approval remain in place.
 Database schema version 8 uses fail-closed compatibility strategy B. Fresh initialization and
 repeat initialization are safe. Unversioned or incompatible databases cause a clear startup error
 before schema writes; existing tables are never silently migrated, dropped, recreated, or deleted.
+
+## Authentication and authorization security
+
+Authentication is server-side. Roles are server-side. Clients cannot choose actors, roles,
+permissions, authentication results, or authorization results. Three fixed complete configuration
+slots bind a `SecretStr` token to a validated stable actor ID and one closed role. Partial slots,
+duplicate tokens, whitespace, and tokens outside the bounded length fail configuration validation.
+Runtime comparison uses `hmac.compare_digest` for every configured slot without early exit.
+
+Only one exact Bearer header is accepted. Missing, duplicate, malformed, wrong-scheme, empty, and
+oversized credentials fail with stable sanitized errors. Query parameters, JSON fields, paths,
+cookies, alternative headers, and environment-like input have no authentication semantics. 401
+responses advertise only `WWW-Authenticate: Bearer`; authorization failures return the single 403
+code `AUTHORIZATION_DENIED`. Protected responses are never cacheable and preserve server-generated
+request IDs without incorporating identity.
+
+The closed role matrix prevents privilege crossover: `READ_ONLY` cannot mutate, `APPROVER` cannot
+execute or reconcile, `EXECUTOR` cannot approve or reject, and only `ADMIN` is unrestricted across
+currently protected routes. Authentication and authorization run before protected business
+operations. Actor IDs are passed separately from strict request models, so authentication does not
+weaken approval provenance, execution parameter binding, or UNKNOWN-only reconciliation.
+
+Authentication failures and protected mutations use bounded fixed-name, fixed-window process-local
+rate limits. This is not a distributed limiter and introduces no Redis or external service.
+Security decisions append only safe actor ID, role, request ID, operation, outcome, time, sequence,
+and hash-link data. Tokens and Authorization headers never enter SQLite, provenance, audit events,
+metrics, responses, exceptions, or allowlisted logs. Recursive redaction covers Authorization,
+Bearer, token/access-token, API-key, secret, and credential-shaped keys.
+
+This phase provides application-level bearer-token authentication only. It does not provide an
+external identity provider, OAuth/OIDC, automated credential rotation, centralized identity
+management, distributed rate limiting, or SSO. Production deployments should place the service
+behind appropriate secret management and network access controls.

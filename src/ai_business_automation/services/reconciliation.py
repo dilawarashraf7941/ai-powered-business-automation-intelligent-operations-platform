@@ -36,6 +36,7 @@ class ReconciliationService:
         self,
         execution_id: str,
         request: ReconciliationRequest,
+        actor_id: str | None = None,
     ) -> ReconciliationResponse:
         now = _utc(self.clock())
         record = self.repository.reconcile(
@@ -43,7 +44,7 @@ class ReconciliationService:
             request.outcome,
             request.reason,
             now,
-            self.reconciler_id,
+            actor_id or self.reconciler_id,
         )
         if record.reconciled_at is None or record.reconciler_id is None:
             raise ExecutionIntegrityError

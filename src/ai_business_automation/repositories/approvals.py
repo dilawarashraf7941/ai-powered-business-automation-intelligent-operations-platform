@@ -130,7 +130,11 @@ class ApprovalRepository(Protocol):
     def initialize(self) -> None: ...
 
     def create(
-        self, record: ApprovalRecord, provenance: TrustedProvenance, occurred_at: datetime
+        self,
+        record: ApprovalRecord,
+        provenance: TrustedProvenance,
+        occurred_at: datetime,
+        actor_id: str | None = None,
     ) -> ApprovalRecord: ...
 
     def get(self, approval_id: str, now: datetime) -> ApprovalRecord: ...
@@ -172,7 +176,11 @@ class SQLiteApprovalRepository:
             connection.close()
 
     def create(
-        self, record: ApprovalRecord, provenance: TrustedProvenance, occurred_at: datetime
+        self,
+        record: ApprovalRecord,
+        provenance: TrustedProvenance,
+        occurred_at: datetime,
+        actor_id: str | None = None,
     ) -> ApprovalRecord:
         evidence_json = _evidence_json(record.evidence)
         provenance_json = canonical_json_bytes(provenance.model_dump(mode="json")).decode("utf-8")
@@ -222,7 +230,7 @@ class SQLiteApprovalRepository:
                 approval_id=record.approval_id,
                 event_type=AuditEventType.APPROVAL_CREATED,
                 status=ApprovalStatus.PENDING,
-                actor_id=_SYSTEM_ACTOR,
+                actor_id=actor_id or _SYSTEM_ACTOR,
                 occurred_at=occurred_at,
                 previous_hash=GENESIS_AUDIT_HASH,
                 sequence_number=1,

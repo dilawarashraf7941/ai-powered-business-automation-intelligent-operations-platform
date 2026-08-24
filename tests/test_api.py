@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from tests.auth_helpers import authenticated_client
 
 from ai_business_automation.api import routes
 from ai_business_automation.config import Environment, Settings
@@ -165,7 +166,7 @@ def test_streamed_oversized_body_is_rejected() -> None:
         yield b"x" * 700
         yield b"x" * 700
 
-    with TestClient(app) as local_client:
+    with authenticated_client(app) as local_client:
         response = local_client.post(
             "/api/v1/events", content=chunks(), headers={"content-type": "application/json"}
         )
@@ -261,7 +262,7 @@ def test_unexpected_exception_is_sanitized(monkeypatch: pytest.MonkeyPatch) -> N
 
     secured = create_app(Settings(environment=Environment.TEST))
     secured.router.routes.extend(app.router.routes)
-    with TestClient(secured, raise_server_exceptions=False) as local_client:
+    with authenticated_client(secured, raise_server_exceptions=False) as local_client:
         response = local_client.get("/broken")
     assert response.status_code == 500
     assert response.json()["error"]["code"] == "INTERNAL_ERROR"
@@ -280,7 +281,7 @@ def test_other_http_error_is_sanitized() -> None:
 
         raise HTTPException(status_code=403, detail="internal policy detail")
 
-    with TestClient(app) as local_client:
+    with authenticated_client(app) as local_client:
         response = local_client.get("/forbidden")
     assert response.status_code == 403
     assert response.json()["error"]["code"] == "HTTP_ERROR"

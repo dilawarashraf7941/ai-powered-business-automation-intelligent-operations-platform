@@ -1,9 +1,9 @@
 # Architecture
 
-Phase 8 adds explicit operational reconciliation for ambiguous external outcomes while preserving
-the Phase 7 provider boundary and all earlier controls.
+Phase 9 adds server-side application authentication and closed-role authorization while preserving
+the Phase 8 reconciliation boundary and all earlier controls.
 
-## Phase 8 shape
+## Phase 9 shape
 
 The project uses a compact `src` layout with responsibilities split by boundary:
 
@@ -11,13 +11,13 @@ The project uses a compact `src` layout with responsibilities split by boundary:
 | --- | --- |
 | `main.py` | Application construction and explicit middleware/handler registration |
 | `api/` | HTTP routes and stable public error contracts |
-| `models/` | Strict events, intelligence, policy, approval, execution, and action schemas |
+| `models/` | Strict business schemas plus trusted authentication actor and closed-role models |
 | `services/` | Advisory analysis, policy, approval, and fixed allowlisted action handlers |
 | `providers/` | Isolated OpenAI analysis and single-operation GHL adapters |
-| `repositories/` | Provider-neutral approval/execution contracts and transactional SQLite adapters |
+| `repositories/` | Transactional business persistence and security-audit hash-chain adapters |
 | `config/` | Validated server-owned settings |
 | `logging/` | Allowlisted JSON log serialization and reusable redaction |
-| `security/` | Request-size enforcement, correlation IDs, and response headers |
+| `security/` | Bearer authentication, authorization, local limiting, request controls, and headers |
 
 ## API boundary
 
@@ -188,6 +188,32 @@ table rebuild, drop, or data deletion occurs.
 AI recommends. Policy decides. Human approves. Executor performs the approved operation. Ambiguous
 external outcomes become UNKNOWN. UNKNOWN requires explicit authorized reconciliation.
 Reconciliation never replays the operation.
+
+## Phase 9 identity boundary
+
+Authenticate. Authorize. Then execute only trusted operations.
+
+The application factory constructs one bearer authenticator from three fixed configuration slots,
+one fixed-bucket process-local limiter, and one SQLite security-audit repository. A protected-route
+dependency strictly parses one `Authorization: Bearer` header, evaluates every configured slot with
+constant-time comparison, creates an immutable `AuthenticatedActor`, appends authentication and
+applicable authorization events, checks the closed role matrix, and only then permits business
+service invocation.
+
+Public routing is limited to health, readiness, and bounded basic event ingestion. Analysis and
+decision routes are authenticated because analysis can consume an external AI provider. Reads
+require any role; approval mutations require `APPROVER` or `ADMIN`; execution and reconciliation
+mutations require `EXECUTOR` or `ADMIN`; administration requires `ADMIN`.
+
+Authenticated actor IDs flow into approval creation and transitions, execution claims and records,
+and reconciliation records and commitments. They do not change policy, provenance, action
+parameters, provider selection, GHL paths, or reconciliation eligibility. Security events occupy
+separate additive tables in the existing SQLite database and use the same canonical chained-hash
+primitive as approval/execution audit events, avoiding duplicate hash-chain logic.
+
+`APP_APPROVER_ID` and `APP_RECONCILER_ID` remain only backward-compatible direct-service development
+fallbacks. Protected HTTP operations always prefer authenticated actor identity. The model is
+application-level authentication, not OAuth/OIDC or an external identity-provider architecture.
 
 ## Future AI evolution
 

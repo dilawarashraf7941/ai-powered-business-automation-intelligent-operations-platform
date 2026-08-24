@@ -150,6 +150,8 @@ class RequestContextMiddleware:
                 headers = list(message.get("headers", []))
                 headers.append((b"x-request-id", request_id.encode("ascii")))
                 headers.append((b"x-content-type-options", b"nosniff"))
+                headers.append((b"cache-control", b"no-store"))
+                headers.append((b"pragma", b"no-cache"))
                 message = {**message, "headers": headers}
             await send(message)
 
@@ -171,6 +173,8 @@ class RequestContextMiddleware:
 def _operation_name(method: str, path: str) -> str:
     known = {
         ("GET", "/health"): "health_check",
+        ("GET", "/ready"): "readiness_check",
+        ("GET", "/api/v1/admin/status"): "admin_status",
         ("POST", "/api/v1/events"): "create_event",
         ("POST", "/api/v1/events/analyze"): "analyze_event",
         ("POST", "/api/v1/events/decide"): "decide_event",
@@ -191,4 +195,6 @@ def _operation_name(method: str, path: str) -> str:
         return "execute_action"
     if path.startswith("/api/v1/actions/executions/") and method == "GET":
         return "read_execution"
+    if path.startswith("/api/v1/actions/executions/") and path.endswith("/reconcile"):
+        return "reconcile_execution"
     return "unmatched_route"

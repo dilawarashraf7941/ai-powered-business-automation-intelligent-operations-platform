@@ -13,6 +13,11 @@ from ai_business_automation.models.approvals import (
     RejectionRequest,
     TrustedProvenance,
 )
+from ai_business_automation.models.auth import (
+    AuthenticatedActor,
+    AuthRole,
+    SecurityAuditEventType,
+)
 from ai_business_automation.models.events import (
     CanonicalBusinessEvent,
     EventAcknowledgement,
@@ -93,6 +98,8 @@ __all__ = [
     "ApprovalStatus",
     "AuditEvent",
     "AuditEventType",
+    "AuthRole",
+    "AuthenticatedActor",
     "BusinessIntelligenceResult",
     "CanonicalBusinessEvent",
     "DecisionOutcome",
@@ -135,6 +142,7 @@ __all__ = [
     "ReconciliationResponse",
     "RejectionRequest",
     "RiskLevel",
+    "SecurityAuditEventType",
     "TrustedProvenance",
     "Urgency",
     "execution_action_for",

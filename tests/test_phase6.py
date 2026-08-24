@@ -71,6 +71,7 @@ from ai_business_automation.services.execution_errors import (
 from ai_business_automation.services.executions import ExecutionService
 from ai_business_automation.services.normalization import EventNormalizer
 from ai_business_automation.services.policy import DeterministicPolicyEngine, PolicyDecisionService
+from tests.auth_helpers import authenticated_client
 
 FIXED_NOW = datetime(2026, 8, 24, 10, 0, tzinfo=UTC)
 EVENT_ID = "evt_phase6_fixed_identity"
@@ -720,7 +721,7 @@ def execution_client(
     approvals, executions, _repository, _database, _clock = execution_boundary
     app = create_app(Settings(environment=Environment.TEST))
     app.dependency_overrides[get_execution_service] = lambda: executions
-    with TestClient(app) as client:
+    with authenticated_client(app) as client:
         yield client, approvals, executions
 
 

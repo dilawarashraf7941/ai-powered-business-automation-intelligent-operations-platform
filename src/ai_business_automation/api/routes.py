@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict
 
 from ai_business_automation.models import (
     ApprovalResponse,
+    AuthenticatedActor,
     BusinessIntelligenceResult,
     EmptyApprovalTransitionRequest,
     ExecutionRequest,
@@ -18,6 +19,7 @@ from ai_business_automation.models import (
     RejectionRequest,
 )
 from ai_business_automation.models.events import EventAcknowledgement, ExternalEvent
+from ai_business_automation.security.auth import require_permission
 from ai_business_automation.services.approval_factory import (
     get_approval_service as _get_approval_service,
 )
@@ -75,11 +77,39 @@ class HealthResponse(BaseModel):
     status: Literal["ok"]
 
 
+class ReadinessResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    status: Literal["ready"]
+
+
+class AdminStatusResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    status: Literal["ok"]
+    authentication: Literal["enabled"]
+    authorization: Literal["enabled"]
+
+
 @router.get("/health", response_model=HealthResponse, tags=["health"])
 async def health() -> HealthResponse:
     """Return process health without consulting external resources."""
 
     return HealthResponse(status="ok")
+
+
+@router.get("/ready", response_model=ReadinessResponse, tags=["health"])
+async def readiness() -> ReadinessResponse:
+    """Return safe process readiness without exposing configuration."""
+
+    return ReadinessResponse(status="ready")
+
+
+@router.get("/api/v1/admin/status", response_model=AdminStatusResponse, tags=["admin"])
+async def admin_status(
+    _actor: Annotated[AuthenticatedActor, Depends(require_permission("admin"))],
+) -> AdminStatusResponse:
+    return AdminStatusResponse(status="ok", authentication="enabled", authorization="enabled")
 
 
 @router.post(
@@ -118,6 +148,7 @@ async def create_event(
 )
 async def analyze_event(
     event: ExternalEvent,
+    _actor: Annotated[AuthenticatedActor, Depends(require_permission("analysis"))],
     intelligence: Annotated[BusinessIntelligenceService, Depends(get_intelligence_service)],
     ingestion: Annotated[EventIngestionService, Depends(get_ingestion_service)],
 ) -> BusinessIntelligenceResult:
@@ -136,6 +167,7 @@ async def analyze_event(
 async def decide_event(
     event: ExternalEvent,
     request: Request,
+    _actor: Annotated[AuthenticatedActor, Depends(require_permission("analysis"))],
     intelligence: Annotated[BusinessIntelligenceService, Depends(get_intelligence_service)],
     policy: Annotated[PolicyDecisionService, Depends(get_policy_service)],
     ingestion: Annotated[EventIngestionService, Depends(get_ingestion_service)],
@@ -169,6 +201,7 @@ async def decide_event(
 async def create_approval(
     event: ExternalEvent,
     request: Request,
+    actor: Annotated[AuthenticatedActor, Depends(require_permission("approval"))],
     approvals: Annotated[ApprovalService, Depends(get_approval_service)],
     intelligence: Annotated[BusinessIntelligenceService, Depends(get_intelligence_service)],
     ingestion: Annotated[EventIngestionService, Depends(get_ingestion_service)],
@@ -177,7 +210,7 @@ async def create_approval(
 
     normalized = ingestion.ingest(event)
     analysis = await intelligence.analyze(normalized.event, normalized.category)
-    result = approvals.create(normalized.event, analysis).public()
+    result = approvals.create(normalized.event, analysis, actor.actor_id).public()
     _log_approval_response(request, result, "approval_created")
     return result
 
@@ -192,6 +225,7 @@ async def get_approval(
         str, Path(min_length=24, max_length=40, pattern=r"^apr_[A-Za-z0-9_-]+$")
     ],
     request: Request,
+    _actor: Annotated[AuthenticatedActor, Depends(require_permission("read"))],
     approvals: Annotated[ApprovalService, Depends(get_approval_service)],
 ) -> ApprovalResponse:
     result = approvals.get(approval_id).public()
@@ -209,11 +243,12 @@ async def approve_approval(
         str, Path(min_length=24, max_length=40, pattern=r"^apr_[A-Za-z0-9_-]+$")
     ],
     request: Request,
+    actor: Annotated[AuthenticatedActor, Depends(require_permission("approval"))],
     approvals: Annotated[ApprovalService, Depends(get_approval_service)],
     transition: EmptyApprovalTransitionRequest | None = None,
 ) -> ApprovalResponse:
     del transition
-    result = approvals.approve(approval_id).public()
+    result = approvals.approve(approval_id, actor.actor_id).public()
     _log_approval_response(request, result, "approval_approved")
     return result
 
@@ -229,9 +264,10 @@ async def reject_approval(
     ],
     rejection: RejectionRequest,
     request: Request,
+    actor: Annotated[AuthenticatedActor, Depends(require_permission("approval"))],
     approvals: Annotated[ApprovalService, Depends(get_approval_service)],
 ) -> ApprovalResponse:
-    result = approvals.reject(approval_id, rejection.reason).public()
+    result = approvals.reject(approval_id, rejection.reason, actor.actor_id).public()
     _log_approval_response(request, result, "approval_rejected")
     return result
 
@@ -261,11 +297,12 @@ def _log_approval_response(request: Request, result: ApprovalResponse, event_nam
 async def execute_action(
     execution_request: ExecutionRequest,
     request: Request,
+    actor: Annotated[AuthenticatedActor, Depends(require_permission("execution"))],
     executions: Annotated[ExecutionService, Depends(get_execution_service)],
 ) -> ExecutionResponse:
     """Execute only the server-derived allowlisted action bound to an approved record."""
 
-    result = executions.execute(execution_request.approval_id).public()
+    result = executions.execute(execution_request.approval_id, actor.actor_id).public()
     _log_execution_response(request, result, "execution_completed")
     return result
 
@@ -280,6 +317,7 @@ async def get_execution(
         str, Path(min_length=24, max_length=40, pattern=r"^exe_[A-Za-z0-9_-]+$")
     ],
     request: Request,
+    _actor: Annotated[AuthenticatedActor, Depends(require_permission("read"))],
     executions: Annotated[ExecutionService, Depends(get_execution_service)],
 ) -> ExecutionResponse:
     result = executions.get(execution_id).public()
@@ -298,11 +336,12 @@ async def reconcile_execution(
     ],
     reconciliation: ReconciliationRequest,
     request: Request,
+    actor: Annotated[AuthenticatedActor, Depends(require_permission("reconciliation"))],
     service: Annotated[ReconciliationService, Depends(get_reconciliation_service)],
 ) -> ReconciliationResponse:
     """Record an authorized external verification without replaying the provider operation."""
 
-    result = service.reconcile(execution_id, reconciliation)
+    result = service.reconcile(execution_id, reconciliation, actor.actor_id)
     _LOGGER.info(
         "execution_reconciliation_returned",
         extra={

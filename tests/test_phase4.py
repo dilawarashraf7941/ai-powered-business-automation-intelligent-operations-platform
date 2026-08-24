@@ -45,6 +45,7 @@ from ai_business_automation.services.policy import (
     PolicyDecisionService,
     PolicyEvaluation,
 )
+from tests.auth_helpers import authenticated_client
 
 FIXED_NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
 EVENT_ID = "evt_fixed_server_identity"
@@ -131,7 +132,7 @@ def decision_client() -> Iterator[tuple[TestClient, PolicyFakeProvider, datetime
     app = create_app(Settings(environment=Environment.TEST))
     app.dependency_overrides[get_intelligence_service] = lambda: intelligence_service
     app.dependency_overrides[get_policy_service] = lambda: policy_service
-    with TestClient(app) as client:
+    with authenticated_client(app) as client:
         yield client, provider, generated_at
 
 
@@ -387,14 +388,14 @@ def test_decide_endpoint_does_not_execute_or_log_sensitive_content(
         response = client.post(
             "/api/v1/events/decide",
             json=api_event(payload={"message_text": marker}),
-            headers={"Authorization": "Bearer header-must-not-be-logged"},
+            headers={"Authorization": "Bearer fake-test-admin-token"},
         )
     finally:
         logger.removeHandler(handler)
     assert response.status_code == 200
     logs = stream.getvalue()
     assert marker not in logs
-    assert "header-must-not-be-logged" not in logs
+    assert "fake-test-admin-token" not in logs
     assert '"decision":"ALLOW"' in logs
     assert '"policy_version":"1.0"' in logs
 
@@ -465,5 +466,5 @@ def _decision_response(provider: PolicyFakeProvider) -> Response:
     app.dependency_overrides[get_policy_service] = lambda: PolicyDecisionService(
         DeterministicPolicyEngine()
     )
-    with TestClient(app) as client:
+    with authenticated_client(app) as client:
         return cast(Response, client.post("/api/v1/events/decide", json=api_event()))

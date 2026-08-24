@@ -1,6 +1,6 @@
 # AI-Powered Business Automation & Intelligent Operations Platform
 
-This repository contains the secure Phase 8 controlled execution and reconciliation boundary for a business
+This repository contains the secure Phase 9 authenticated execution and authorization boundary for a business
 automation and intelligent operations platform. It normalizes bounded events, obtains strictly
 validated advisory AI analysis, evaluates deterministic policy, and records approval-required
 decisions before allowing fixed local actions or one narrowly scoped external mutation.
@@ -21,11 +21,16 @@ decisions before allowing fixed local actions or one narrowly scoped external mu
 >
 > **UNKNOWN requires explicit authorized reconciliation; reconciliation never replays the operation.**
 
-## Current Phase 8 scope
+## Current Phase 9 scope
 
 - Python 3.12 project using a `src` layout
 - Strict environment configuration through `APP_` variables
-- Lightweight unauthenticated health check
+- Public, metadata-minimal health and readiness checks
+- Server-configured bearer authentication with three fixed credential slots
+- Closed `READ_ONLY`, `APPROVER`, `EXECUTOR`, and `ADMIN` roles
+- Authorization before every protected business operation
+- Tamper-evident authentication and authorization audit events
+- Bounded process-local authentication-failure and mutation rate limits
 - Closed event/source taxonomies and strict, bounded external-event validation
 - UTC normalization, server event identity, and deterministic event classification
 - Canonical sorted UTF-8 serialization with an 8 KiB internal ceiling
@@ -69,6 +74,45 @@ Returns only:
 ```json
 {"status": "ok"}
 ```
+
+`GET /ready` is also public and returns only `{"status":"ready"}`.
+
+## Authentication and authorization
+
+Authenticate. Authorize. Then execute only trusted operations.
+
+Phase 9 supports at most three complete server-owned credential slots:
+`APP_AUTH_TOKEN_1`/`APP_AUTH_ACTOR_1`/`APP_AUTH_ROLE_1`, continuing through slot 3. Tokens are
+`SecretStr` values and are never returned, logged, persisted, audited, or accepted through query,
+path, body, cookie, or alternative headers. `Authorization` must be exactly one strict
+`Bearer <token>` header; all configured slots are compared in constant time without early exit.
+Missing or invalid authentication returns a sanitized 401 with `WWW-Authenticate: Bearer`.
+
+| Role | Allowed operations |
+|---|---|
+| `READ_ONLY` | Read approvals and executions; use protected analysis/decision endpoints |
+| `APPROVER` | All reads plus create, approve, and reject approvals |
+| `EXECUTOR` | All reads plus execute and reconcile |
+| `ADMIN` | All protected operations, including `GET /api/v1/admin/status` |
+
+`GET /health`, `GET /ready`, and basic `POST /api/v1/events` ingestion remain public. Ingestion is
+the existing bounded untrusted-input boundary and performs no AI call, persistence, workflow, or
+action. AI-backed `/api/v1/events/analyze` and policy `/api/v1/events/decide` require authentication.
+Protected responses carry `Cache-Control: no-store` and `Pragma: no-cache`.
+
+Authenticated identity supersedes `APP_APPROVER_ID` and `APP_RECONCILER_ID` on protected endpoints;
+those settings remain only for backward-compatible direct-service development use. Fixed-name
+process-local buckets limit authentication failures and protected mutations without using actor IDs
+as metric labels.
+
+Security audit events use a persistent canonical SHA-256 chain and closed event types for successful
+and failed authentication, approval authorization, execution authorization, and reconciliation
+authorization. Events contain safe actor/role/request/operation/outcome metadata, never credentials.
+
+This is application-level bearer-token authentication. It does not provide OAuth/OIDC, an external
+identity provider, automated credential rotation, centralized identity management, distributed
+rate limiting, or SSO. Production deployments should use appropriate secret management and network
+access controls.
 
 ### `POST /api/v1/events`
 
@@ -148,7 +192,8 @@ characters. No terminal state can transition again.
 Approval IDs and audit IDs use cryptographically secure randomness. TTL defaults to 1,800 seconds
 and is bounded to 60–86,400 seconds through `APP_APPROVAL_TTL_SECONDS`. The database location is a
 validated server-owned relative `.sqlite3` path. `APP_APPROVER_ID` is a bounded development/server
-identity only; it is not authentication and is never accepted from request bodies.
+fallback identity only; authenticated HTTP actors supersede it and no identity is accepted from
+request bodies.
 
 Full canonical events and intelligence are hashed but not stored. The trusted provenance record
 stores SHA-256 digest commitments for those canonical representations plus event identity/type,
@@ -297,17 +342,17 @@ label, and server timestamp. The API never returns the reason. Reconciliation im
 HTTP capability, performs no lookup or polling, creates no execution or approval, and never calls
 GHL.
 
-`APP_RECONCILER_ID` is a bounded server-owned operational label. It is not authentication, a user
-identity, or a role system; Phase 8 still requires deployment-level access control around the API.
+`APP_RECONCILER_ID` is a bounded legacy direct-service label. Authenticated HTTP reconciliation
+uses only the server-derived `EXECUTOR` or `ADMIN` actor.
 
 Schema version 8 is explicit. Fresh databases are created safely and repeated initialization is
 idempotent. A database without compatible version metadata fails startup with `SCHEMA_INCOMPATIBLE`;
-Phase 8 does not drop, rebuild, delete, or silently migrate existing Phase 6/7 data.
+Phase 9 does not drop, rebuild, delete, or silently migrate existing Phase 6/7 data.
 
 ## Current limitations
 
-Phase 8 intentionally has no real authentication, queue, workflow engine, tool calling, AI memory,
-autonomous action selection, n8n integration, or other CRM mutation. SQLite persists approval,
+Phase 9 intentionally has no OAuth/OIDC, external identity provider, queue, workflow engine, tool
+calling, AI memory, autonomous action selection, n8n integration, or other CRM mutation. SQLite persists approval,
 execution, audit, action-parameter commitments, and bounded internal-effect metadata; business
 events and AI content are not stored. Execution is single-process and there is no distributed lock,
 retry worker, automated reconciliation, provider polling, or external provider delivery guarantee.

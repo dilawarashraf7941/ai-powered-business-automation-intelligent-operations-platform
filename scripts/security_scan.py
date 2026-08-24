@@ -62,6 +62,24 @@ def _call_name(node: ast.expr) -> str:
 
 def main() -> int:
     findings = [finding for path in SOURCE.rglob("*.py") for finding in scan_file(path)]
+    auth_source = (SOURCE / "ai_business_automation" / "security" / "auth.py").read_text(
+        encoding="utf-8"
+    )
+    routes_source = (SOURCE / "ai_business_automation" / "api" / "routes.py").read_text(
+        encoding="utf-8"
+    )
+    if "hmac.compare_digest" not in auth_source:
+        findings.append("authentication tokens require constant-time comparison")
+    if "query_params" in auth_source or "X-Authorization" in auth_source:
+        findings.append("alternative authentication channel detected")
+    protected_permissions = {
+        'require_permission("approval")',
+        'require_permission("execution")',
+        'require_permission("reconciliation")',
+        'require_permission("admin")',
+    }
+    if any(permission not in routes_source for permission in protected_permissions):
+        findings.append("protected route authorization dependency is missing")
     forbidden_files = [ROOT / ".env"]
     findings.extend(
         f"{path}: local environment file must not be tracked"

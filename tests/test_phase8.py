@@ -12,7 +12,6 @@ from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from ai_business_automation.api.routes import (
@@ -65,6 +64,7 @@ from ai_business_automation.services.executions import ExecutionService
 from ai_business_automation.services.normalization import EventNormalizer
 from ai_business_automation.services.policy import DeterministicPolicyEngine, PolicyDecisionService
 from ai_business_automation.services.reconciliation import ReconciliationService
+from tests.auth_helpers import authenticated_client
 
 NOW = datetime(2026, 8, 24, 15, 0, tzinfo=UTC)
 EVENT_ID = "evt_phase8_reconcile_id"
@@ -221,7 +221,7 @@ def test_reconciliation_response_and_status_hide_reason_and_provider_data(
     app = create_app(Settings(environment=Environment.TEST))
     app.dependency_overrides[get_execution_service] = lambda: executions
     app.dependency_overrides[get_reconciliation_service] = lambda: reconciliation
-    with TestClient(app) as client:
+    with authenticated_client(app) as client:
         response = client.post(
             f"/api/v1/actions/executions/{execution_id}/reconcile",
             json={"outcome": "SUCCEEDED", "reason": REASON},

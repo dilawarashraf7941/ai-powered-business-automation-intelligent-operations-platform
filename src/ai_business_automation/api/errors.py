@@ -9,6 +9,11 @@ from starlette.exceptions import HTTPException
 
 from ai_business_automation.models.events import PayloadLimitError, UnsafePayloadError
 from ai_business_automation.providers import AIAnalysisError
+from ai_business_automation.security.auth import (
+    AuthenticationError,
+    AuthorizationError,
+    RateLimitError,
+)
 from ai_business_automation.services.approval_errors import ApprovalError
 from ai_business_automation.services.execution_errors import ExecutionBoundaryError
 from ai_business_automation.services.normalization import EventNormalizationError
@@ -55,6 +60,20 @@ def error_response(request: Request, status: int, code: str, message: str) -> JS
         status_code=status,
         content={"error": {"code": code, "message": message, "request_id": _request_id(request)}},
     )
+
+
+async def authentication_error_handler(request: Request, exc: AuthenticationError) -> JSONResponse:
+    response = error_response(request, 401, exc.code, "Authentication is required.")
+    response.headers["WWW-Authenticate"] = "Bearer"
+    return response
+
+
+async def authorization_error_handler(request: Request, _exc: AuthorizationError) -> JSONResponse:
+    return error_response(request, 403, "AUTHORIZATION_DENIED", "Authorization was denied.")
+
+
+async def rate_limit_error_handler(request: Request, _exc: RateLimitError) -> JSONResponse:
+    return error_response(request, 429, "RATE_LIMITED", "Request rate limit exceeded.")
 
 
 async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:

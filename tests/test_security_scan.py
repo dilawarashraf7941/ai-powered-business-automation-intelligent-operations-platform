@@ -168,6 +168,7 @@ def test_sqlite_and_sql_are_confined_to_repository_adapter() -> None:
     assert sqlite_importers == {
         "src/ai_business_automation/repositories/approvals.py",
         "src/ai_business_automation/repositories/executions.py",
+        "src/ai_business_automation/repositories/security_audit.py",
     }
     routes = (SOURCE / "ai_business_automation" / "api" / "routes.py").read_text(encoding="utf-8")
     for sql_keyword in ("SELECT ", "INSERT ", "UPDATE ", "DELETE ", "PRAGMA "):

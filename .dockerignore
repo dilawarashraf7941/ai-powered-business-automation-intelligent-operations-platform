@@ -3,6 +3,8 @@
 .env
 .env.*
 .venv
+venv
+env
 *.db
 *.db-journal
 *.db-shm
@@ -19,6 +21,7 @@
 .ruff_cache
 __pycache__
 .coverage
+coverage.xml
 htmlcov
 dist
 build
@@ -27,3 +30,14 @@ build
 tests
 .test-data
 release-*/
+.idea
+.vscode
+*.code-workspace
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.tmp
+*.temp
+*.pem
+*.key
+.pypirc

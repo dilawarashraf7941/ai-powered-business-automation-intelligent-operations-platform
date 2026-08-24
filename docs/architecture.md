@@ -1,198 +1,155 @@
 # Architecture
 
-Phase 8 adds bounded observability and operational safety without expanding the Phase 7
-authentication boundary or the single controlled external mutation.
+## System shape
 
-## Phase 8 shape
+The platform is a single-process Python 3.12 application whose boundaries separate untrusted
+events, advisory AI, deterministic authority, human authorization, and external side effects.
 
-The project uses a compact `src` layout with responsibilities split by boundary:
+```mermaid
+flowchart LR
+    Client -->|strict HTTP models| API[FastAPI boundary]
+    API --> Ingest[Normalize and classify]
+    Ingest --> AI[Advisory AI boundary]
+    AI --> Policy[Deterministic policy]
+    Policy --> Approval[Durable approval]
+    Approval --> Auth[Bearer authentication and RBAC]
+    Auth --> Claim[Atomic execution claim]
+    Claim --> Executor[ADD_CONTACT_TAG executor]
+    Executor --> GHL[Fixed GHL adapter]
+    Approval --> Audit[Hash-linked audit]
+    Claim --> Audit
+    API --> Observe[Safe logs and fixed metrics]
+```
 
-| Layer | Responsibility |
+| Package | Responsibility |
 | --- | --- |
-| `main.py` | Application construction and explicit middleware/handler registration |
 | `api/` | HTTP routes and stable public error contracts |
-| `models/` | Strict business schemas plus closed observability enums and snapshots |
-| `services/` | Business services, fixed action handler, local readiness, and fixed metrics |
-| `providers/` | Isolated OpenAI analysis and single-operation GHL adapters |
-| `repositories/` | Provider-neutral approval/execution contracts and transactional SQLite adapters |
-| `config/` | Validated server-owned settings |
-| `logging/` | Async request context, allowlisted JSON logs, and bounded recursive redaction |
-| `security/` | Authentication, request limits, correlation, metrics timing, and safe headers |
+| `config/` | Strict server-owned environment settings |
+| `logging/` | Async request context, bounded JSON logging, and redaction |
+| `models/` | Strict immutable domain and API schemas |
+| `providers/` | Isolated OpenAI analysis and one-operation GHL adapters |
+| `repositories/` | Transactional SQLite approval, execution, and security-audit persistence |
+| `security/` | Bearer authentication, RBAC, rate limiting, request limits, and headers |
+| `services/` | Ingestion, analysis, policy, approval, execution, readiness, and metrics |
 
-## API boundary
+## Trust boundaries
 
-HTTP is the only application boundary. Middleware first assigns a cryptographically
-random request ID and then reads at most the configured request-body ceiling. FastAPI parses only a
-body that has already passed this limit. Pydantic then validates the event envelope and recursively
-checks its payload. Routes receive validated models rather than raw dictionaries.
+### Event boundary
 
-The health route is deliberately isolated from all resources. Readiness checks only local SQLite
-schema accessibility through the repository boundary. Neither route consults OpenAI or GHL.
+HTTP middleware assigns a random authoritative request ID and enforces the configured body limit
+before FastAPI parsing. Strict Pydantic models reject unknown fields and bound the event envelope,
+payload depth, nodes, field names, arrays, strings, numbers, timestamps, URL-like content,
+credential-like keys, and command-like content.
 
-## Observability boundary
+Normalization converts timestamps to UTC, applies age/skew rules, deep-copies the payload, creates
+server identity and receipt time, and maps the closed event taxonomy to a closed category. Compact,
+sorted UTF-8 canonical JSON is bounded to 8 KiB. Event ingestion returns a safe acknowledgement;
+there is no business-event repository, queue, scheduler, or background processor.
 
-`RequestContextMiddleware` generates 128 random bits rendered as exactly 32 lowercase hexadecimal
-characters. It ignores client `X-Request-ID`, stores the authoritative value in request state and an
-async-safe context variable, returns it in the response, and records it in safe logs and errors.
-Successful authentication adds only the server-derived actor ID and closed role to that context;
-credential material never enters it.
+### AI boundary
 
-The JSON formatter accepts only a closed field allowlist and safe event-name syntax. Recursive
-redaction has bounded depth, field count, sequence length, key length, and scalar length. The final
-serialized record is capped at 4 KiB. Logs do not include bodies, customer text, prompts, model or
-provider output, headers, cookies, secrets, paths, arbitrary URLs, or ordinary exception traces.
+`BusinessIntelligenceService` depends on a provider-neutral protocol. The OpenAI adapter is the
+only OpenAI SDK boundary. It receives a bounded allowlist of the canonical event and uses a
+server-owned model, fixed instruction, timeout, zero retries, strict JSON-schema output, storage
+disabled, and no tools. Output is treated as untrusted and revalidated into closed enums and
+bounded text before use.
 
-`OperationalMetrics` allocates one counter for each member of a fixed enum and one latency
-aggregate. Counters and totals saturate at a fixed integer ceiling; latency is clamped and stores
-only count, total, minimum, and maximum. There are no dynamic keys or labels. Metrics reset on
-process restart and are neither durable nor cross-worker aggregates.
+AI cannot access credentials, policy authority, approval state, the executor, GHL, arbitrary URLs,
+or a tool framework. Provider failure stops the operation with a safe category.
 
-`GET /api/v1/admin/status` remains `ADMIN`-only. It returns only closed status, policy version,
-`ADD_CONTACT_TAG`, authenticated role, readiness, and the fixed metrics snapshot. Observability has
-no dependency on the executor and grants no permission.
+### Policy boundary
 
-**OBSERVABILITY NEVER AUTHORIZES ACTIONS. HEALTH/READINESS NEVER CALL EXTERNAL PROVIDERS. METRICS
-NEVER CONTAIN CUSTOMER DATA.**
+The version `1.0` deterministic policy engine is pure: it reads only the validated canonical event
+and validated intelligence result. It owns its confidence threshold, rule precedence, closed
+decisions, recommended actions, risk values, and evidence codes. It performs no I/O and does not
+read headers, configuration secrets, time, randomness, or network state.
 
-## Untrusted event boundary
+Results are `ALLOW`, `REQUIRE_HUMAN_APPROVAL`, or `DENY`. `ALLOW` describes policy only and grants
+no execution authority. The GHL action path is available only when policy requires a human approval
+for a validated internal `GHL_CONTACT_TAG_REQUEST`.
 
-An event is data, never an instruction. Its envelope rejects unknown fields, and its payload has
-limits on serialized bytes, nesting depth, fields, fields per object, array items, total values,
-field-name syntax, string length, and numeric range. Capability-bearing keys and URL-, credential-,
-or command-like content are rejected.
+### Approval boundary
 
-## Normalization and classification
+Approval creation recomputes normalization, AI analysis, and policy; clients cannot submit policy
+or provenance. Only `REQUIRE_HUMAN_APPROVAL` creates `PENDING`. The record owns server-generated
+identity, timestamps, TTL, decision/action/risk/evidence, and digest commitments to canonical event
+and intelligence inputs.
 
-The API passes a validated `ExternalEvent` to `EventIngestionService`. `EventNormalizer` converts
-the timestamp to UTC, enforces a 365-day past and five-minute future skew window, creates a random
-authoritative event ID and server receipt time, deep-copies the payload, and builds fixed internal
-metadata. The client may provide only a bounded external reference, never internal metadata.
+The lifecycle is `PENDING -> APPROVED | REJECTED | EXPIRED`; terminal states do not transition.
+SQLite transactions use `BEGIN IMMEDIATE` and conditional updates. Reads persist expiry when due.
+The authenticated actor, not a request field, is recorded on approve/reject.
 
-The resulting `CanonicalBusinessEvent` has deterministic enum and UTC datetime representations.
-Canonical JSON uses sorted keys, compact separators, UTF-8, and an 8 KiB ceiling. It is not signed
-or hashed in Phase 2. `EventClassifier` then maps the closed event enum to the closed `CUSTOMER`,
-`COMMERCE`, `SUPPORT`, `INTERNAL`, or `SYSTEM` category enum.
+### Authentication and authorization boundary
 
-The event response exposes only acknowledgement fields. There are no event repositories, queues,
-generic outbound clients, dynamic dispatchers, background workers, interpreters, or in-memory
-deduplication stores. Durable business-event storage, idempotency, and processing remain future
-boundaries; the approval repository added in Phase 5 stores no event content.
+Protected routes accept exactly one strict Bearer header. Every configured credential slot is
+compared with `hmac.compare_digest` before a match is selected. Token, actor, and role slots must be
+complete; actors and roles are server-configured and cannot be overridden by a body or header.
 
-## Advisory AI boundary
+The closed roles are `READ_ONLY`, `APPROVER`, `EXECUTOR`, and `ADMIN`. All roles may read and use
+analysis/policy. Approval mutation requires `APPROVER` or `ADMIN`; execution requires `EXECUTOR` or
+`ADMIN`; administrative status requires `ADMIN`. Authentication failures and mutations use two
+fixed-size process-local rate-limit buckets.
 
-`POST /api/v1/events/analyze` accepts the existing strict `ExternalEvent`; it does not pretend to
-look up an event because persistence still does not exist. The existing ingestion service creates
-the canonical event and category. `BusinessIntelligenceService` then constructs an allowlisted,
-bounded representation and calls only the `AIAnalysisProvider` protocol.
+### Execution boundary
 
-The OpenAI adapter is the sole module importing the official SDK and the sole outbound provider
-network boundary. It uses the Responses API with a server-owned model and system instruction,
-strict JSON-schema output, storage disabled, an SDK timeout, zero retries, and no tools. The service
-revalidates the returned mapping, attaches authoritative event identity/category, and returns only
-the advisory result.
+The execution request contains only an approval ID, bounded contact ID, and one bounded tag. The
+repository reloads and verifies approval status, expiry, provenance, policy version, and audit
+integrity, then requires the requested contact/tag to equal the approval commitment.
 
-No prompt, headers, cookies, server settings, credentials, internal metadata, or filesystem details
-cross the provider boundary. No raw provider response crosses the API boundary.
+Claiming runs in one `BEGIN IMMEDIATE` transaction. A unique approval reference and conditional
+`PENDING -> CLAIMED` update prevent duplicate/concurrent claims. The only executor exposes
+`ADD_CONTACT_TAG`; there is no action registry, dynamic import, provider selector, generic request
+method, arbitrary URL, or client-selected retry.
 
-## Deterministic policy boundary
+The lifecycle is `PENDING -> CLAIMED -> SUCCEEDED | FAILED | UNKNOWN`. `FAILED` is a definite
+failure. `UNKNOWN` means provider completion cannot be established. Both are terminal; neither is
+automatically retried or replayed.
 
-`POST /api/v1/events/decide` normalizes the submitted event, reuses
-`BusinessIntelligenceService`, and passes only the validated canonical event and validated
-`BusinessIntelligenceResult` to `DeterministicPolicyEngine`. The engine is provider-independent,
-has no I/O, and returns an immutable evaluation from policy version `1.0`. A separate wrapper adds
-`generated_at` after calculation and emits allowlisted operational logs.
+### Provider boundary
 
-The pure calculation uses a `0.85` server-owned confidence threshold and closed event, AI, action,
-decision, risk, and evidence enums. It never uses time, randomness, environment-dependent logic,
-network state, headers, prompts, raw responses, or payload text. Identical inputs and version always
-produce the same evaluation.
+`httpx` is confined to the GHL adapter. The adapter owns the exact origin
+`https://services.leadconnectorhq.com`, constructs only
+`POST /contacts/{contactId}/tags`, supplies the server credential and `Version: v3`, disables
+redirect following, bounds timeout/response size, and sends only `{"tags": [tag]}`. Raw provider
+bodies and exception details do not leave the adapter.
 
-Rule precedence is fail-closed: invalid version, event identity mismatch, deterministic category
-mismatch, or absent AI reasons returns `DENY`. A `NONE` recommendation conflicting with `HIGH` or
-`CRITICAL` priority or `HIGH` urgency is also denied. Otherwise low confidence, high/critical
-priority, high urgency, unknown intent, and `CONTACT_HUMAN`, `REQUEST_INFORMATION`, `ESCALATE`,
-`SCHEDULE_CONSULTATION`, or `NURTURE` require human approval. Clean `NONE` and low-risk `REVIEW`
-produce `ALLOW`. `ESCALATE` and high signals elevate risk deterministically.
+### Audit boundary
 
-`ALLOW` is a policy result, not an execution command. Execution requires a persisted human approval
-where policy required one; workflow engines and non-allowlisted integrations remain absent.
+Approval and execution events extend a canonical SHA-256 chain committed by count and head hash on
+the approval record. Security authentication/authorization events use a separate persistent
+hash-linked chain. Audit fields are closed and omit tokens, headers, event payloads, AI content,
+provider responses, contact IDs, and tags.
 
-## Human approval boundary
+The chains provide application-level tamper evidence, not database immutability. An attacker able
+to rewrite all records and recompute the complete unkeyed chain is outside this guarantee.
 
-`POST /api/v1/approvals` accepts only `ExternalEvent`. It reuses ingestion and intelligence, then
-`ApprovalService` calls the existing `PolicyDecisionService`; no client policy result is trusted.
-Only `REQUIRE_HUMAN_APPROVAL` is persisted. The service owns random approval identity, creation and
-expiry times, policy fields, provenance, TTL, and the configured development approver identity.
+### Observability boundary
 
-The lifecycle is closed: `PENDING` may become `APPROVED`, `REJECTED`, or `EXPIRED`; every terminal
-state is final. Reads atomically persist expiration. Approval and rejection transitions perform
-integrity validation inside `BEGIN IMMEDIATE`, then use `UPDATE ... WHERE approval_id = ? AND
-status = 'PENDING'` and require one affected row. This serializes concurrent SQLite writers and
-prevents double decisions and expiry races.
+Request context contains only the server request ID and, after authentication, server-derived actor
+ID/role. Logs use a fixed field allowlist, bounded recursive redaction, bounded scalar/container
+sizes, and a 4 KiB final record limit. They exclude bodies, customer text, prompts, raw provider
+data, credentials, paths, arbitrary URLs, and stack traces.
 
-The provenance builder canonicalizes the full validated event and intelligence separately and
-stores only their SHA-256 digest commitments. A second canonical safe object binds those digests to
-event type/source, confidence, policy version, decision, action, risk, and evidence; its SHA-256 is
-the stored provenance hash. Transitions recompute the safe hash and compare every stored policy
-field. Payloads, AI summaries/reasons, prompts, headers, and credentials are never persisted.
+Metrics are a fixed enum of saturating counters plus aggregate request latency with no labels or
+per-request history. They are process-local, reset on restart, and never participate in policy,
+authorization, approval, or execution.
 
-Each creation, transition, expiry, and rejected transition appends an audit event. Event hashes are
-`SHA-256(canonical event bytes + previous hash)`; the first event uses 64 zero characters. Sequence,
-previous hash, event hash, unique audit ID, stored count, and stored head are verified together by
-an internal service before authorization.
+### Deployment boundary
 
-## Controlled execution boundary
+Production settings fail closed on missing/weak/placeholder credentials, debug configuration,
+`DEBUG` logging, unapproved models, unsafe policy values, development fallback identity, and unsafe
+SQLite configuration. The relative database parent must already exist. Startup validates local
+persistence without provider calls; operation-scoped SQLite connections close deterministically.
 
-The execution API accepts a strict approval ID, contact ID, and single tag. `SQLiteExecutionRepository.claim` starts
-`BEGIN IMMEDIATE`, verifies the full approval provenance and audit chain, requires `APPROVED` before
-the server-owned expiry, requires `ADD_CONTACT_TAG`, verifies inputs against approval provenance,
-rejects any prior execution, writes `PENDING`, and conditionally changes it to `CLAIMED`. A unique
-`approval_id` constraint and affected-row check make claiming single-use under concurrent requests.
+The container pins Python and runtime packages, copies only source, runs one Uvicorn worker as
+UID/GID `10001:10001`, and health-checks `/health`. Static release checks verify the Docker,
+configuration, origin/action, security-header, secret, artifact, and dependency-pin constraints
+without network access or database mutation.
 
-`ContactTagExecutor` is the only action executor and delegates only to the dedicated provider method.
-No API value can select a handler,
-callable, module, plugin, URL, provider, method, headers, body, command, timeout, or retry policy.
+## Deliberate limitations
 
-The lifecycle is `PENDING → CLAIMED → SUCCEEDED | FAILED | UNKNOWN`. `FAILED` is definitive
-non-completion; `UNKNOWN` means completion cannot
-be established. Neither state retries automatically, and every terminal state is final. The current
-phase has no background worker or replay mechanism.
-
-Execution events reuse the approval audit chain and canonical SHA-256 event hashing. The existing
-approval row count/head commitment covers `EXECUTION_AUTHORIZED`, `EXECUTION_CLAIMED`,
-`EXECUTION_SUCCEEDED`, `EXECUTION_FAILED`, and `EXECUTION_UNKNOWN`. Execution rows carry
-deterministic SHA-256 integrity commitments.
-
-## Controlled GHL provider boundary
-
-The only external action is `ADD_CONTACT_TAG`. Deterministic policy derives it solely from a
-validated internal `GHL_CONTACT_TAG_REQUEST`; AI has no GHL action in its recommendation taxonomy.
-Approval provenance contains a canonical commitment to the action, contact ID, one tag, event
-and intelligence digests, policy version, decision, risk, and evidence. Execution reconstructs the
-typed parameters from that trusted record and accepts no execution-time substitution.
-
-The dedicated adapter exposes only `add_contact_tag`, uses the fixed origin
-`https://services.leadconnectorhq.com`, constructs `POST /contacts/{contactId}/tags`, supplies
-server-owned bearer authentication and `Version: v3`, and creates exactly `{tags: [...]}`. `httpx`
-is confined to this adapter. There is no configurable origin, arbitrary endpoint, generic request
-method, arbitrary header/body capability, provider selector, or automatic retry.
-
-Documented definitive HTTP failures produce `FAILED`; timeout and post-transmission ambiguity
-produce `UNKNOWN`. Both are terminal locally. `UNKNOWN` requires manual reconciliation because no
-unsupported idempotency mechanism is invented. Audit events reuse the execution lifecycle and bind
-only the closed failure category—not credentials, targets, tags, or provider bodies.
-
-**AI recommends. Policy decides. Human approves. Executor performs only the approved allowlisted operation.**
-
-## Future AI evolution
-
-The AI boundary remains analysis-only. Any future expansion requires separate budget controls,
-model allowlists, audit policy, authorization, and threat modeling. Untrusted event data and model
-output must never gain authority merely because a model processed or generated them.
-
-## Future integration constraints
-
-The sole GHL contact-tag adapter does not generalize into a workflow framework. Any future
-integration would require a separately reviewed provider-owned schema, authorization policy,
-reconciliation design, and delivery guarantees. Neither event fields nor AI output may select
-arbitrary tools or destinations.
+SQLite persistence, metrics, and rate limiting are process-local. The production baseline is one
+process, one worker, and one application instance. There is no horizontal SQLite design,
+distributed lock, durable event queue, scheduler, background worker, automatic retry/replay,
+workflow engine, n8n integration, autonomous agent, generic CRM layer, or real-time monitoring
+backend.

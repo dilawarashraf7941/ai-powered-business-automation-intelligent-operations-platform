@@ -1,75 +1,139 @@
 # Production deployment
 
-## Supported baseline
+## Prerequisites and supported topology
 
-Phase 9 supports one Python 3.12 process and one application instance backed by one persistent
-SQLite database. SQLite, metrics, and authentication/mutation rate limiting are process-local. Do
-not deploy multiple replicas against the same database. Horizontal deployment requires a separately
-designed durable persistence, coordination, rate-limiting, and metrics architecture.
+- A Docker-enabled host or a Python 3.12 runtime.
+- A trusted secret manager or equivalent runtime environment injection.
+- A persistent filesystem location writable by UID/GID `10001:10001`.
+- Outbound access to the configured OpenAI service and the fixed GHL origin when those operations
+  are used.
+- A trusted TLS-terminating reverse proxy or platform load balancer.
 
-## Required production environment
+The supported production topology is one application instance, one process, and one Uvicorn
+worker. SQLite, operational metrics, and rate limits are process-local. Do not run multiple workers
+or replicas against this SQLite database. Horizontal operation requires a separately designed
+durable database, distributed coordination, rate limiting, and metrics system.
 
-Set `APP_ENVIRONMENT=production`, keep `APP_DEBUG=false`, and inject configuration at runtime. Never
-bake secrets into an image or commit an environment file. Required settings are:
+## Required configuration
 
-- `APP_LOG_LEVEL=INFO`; production rejects `DEBUG`.
-- `APP_APPROVAL_DATABASE_PATH=data/approvals.sqlite3` and a non-development
-  `APP_APPROVER_ID`.
-- At least one complete fixed credential slot: `APP_AUTH_TOKEN_1`, `APP_AUTH_ACTOR_1`, and
-  `APP_AUTH_ROLE_1`. Optional slots 2 and 3 must also be complete.
-- `APP_GHL_API_KEY`, `APP_GHL_API_VERSION=v3`, and a bounded timeout.
-- `APP_OPENAI_API_KEY`, allowlisted `APP_OPENAI_MODEL=gpt-5-mini`, and bounded timeout, input, and
-  output settings.
-- A validated deterministic policy threshold.
+Set `APP_ENVIRONMENT=production`, `APP_DEBUG=false`, and a non-`DEBUG` log level. Production
+requires:
 
-Production rejects missing, short, whitespace-bearing, duplicate, or obvious placeholder
-credentials without including their values in errors. Store credentials in the deployment
-platform's secret manager. They must not be logged, returned, persisted, or placed in image layers.
+- `APP_APPROVAL_DATABASE_PATH`, explicitly set to a relative `.sqlite3` path whose trusted parent
+  already exists.
+- A non-development `APP_APPROVER_ID` fallback label.
+- At least one complete `APP_AUTH_TOKEN_1`, `APP_AUTH_ACTOR_1`, `APP_AUTH_ROLE_1` credential slot.
+  Slots 2 and 3 are optional but must be complete when used.
+- `APP_GHL_API_KEY`; `APP_GHL_API_VERSION` remains `v3` and the timeout remains bounded.
+- `APP_OPENAI_API_KEY`; `APP_OPENAI_MODEL` remains the allowlisted `gpt-5-mini` and AI input,
+  output, and timeout settings remain bounded.
+- A policy confidence threshold in the production-safe range.
 
-The GHL origin is fixed as `https://services.leadconnectorhq.com`; configuration and requests cannot
-override it. OpenAI uses the server-owned model, no tools, no retries, storage disabled, and strict
-structured output. CORS remains disabled.
+Production rejects missing, weak, whitespace-bearing, duplicate, and obvious placeholder secrets,
+debug settings, the development approver, unsafe/missing SQLite parents, unapproved model names,
+and unsafe policy configuration. It does not include secret values in errors.
 
-## SQLite persistence and lifecycle
+## Secret setup
 
-Mount a persistent volume at `/app/data`. The configured relative path's parent must already exist
-and be writable only by UID/GID `10001:10001`; the application does not create arbitrary parent
-directories. Existing foreign-key, WAL, busy-timeout, and transactional locking behavior remains.
-Production startup validates and initializes local persistence without contacting GHL or OpenAI.
+Inject authentication, GHL, and OpenAI credentials at container/process start through the platform
+secret manager. Do not write a production `.env`, include credentials in command history, build
+arguments, Docker layers, image metadata, repository files, logs, or backups. `.env.example` is a
+non-secret development reference and intentionally omits credential values.
 
-Back up the database and WAL consistently with an operator-reviewed SQLite backup procedure, and
-test restoration separately. Retention, encryption, and off-host storage are deployment concerns.
-SQLite connections are operation-scoped and close deterministically. Graceful termination releases
-repository lifecycle state; there are no background workers or shutdown retries.
+Rotate a credential by updating its complete server slot and restarting the single process through
+the deployment platform's controlled rollout. The application has no credential-management API.
 
-## Container deployment
+## SQLite storage and permissions
 
-The production `Dockerfile` uses pinned `python:3.12.10-slim-bookworm`, installs only exactly pinned
-runtime dependencies, and copies only application source. It starts one Uvicorn worker with an
-exec-form command. The process runs as fixed non-root UID/GID `10001:10001`, with write access only
-to the mounted `/app/data` location. Tests, Git metadata, environment files, databases, caches,
-coverage data, and build artifacts are excluded from the context.
+The container creates `/app/data` owned by `10001:10001`; mount a persistent volume there and use,
+for example, `APP_APPROVAL_DATABASE_PATH=data/approvals.sqlite3`. The path is evaluated relative to
+the application working directory. The parent must already exist and be a directory. The
+application does not create arbitrary parents and clients cannot select a path.
 
-Publish port 8000 only behind a trusted reverse proxy, terminate TLS there, and inject configuration
-through the platform's secret facility. The proxy should enforce network boundaries and connection
-limits compatible with the application's bounded timeouts.
+SQLite connections preserve foreign keys, WAL mode, a bounded busy timeout, explicit transactions,
+conditional state changes, and operation-scoped cleanup. Production startup initializes and checks
+local schema access before serving, without calling OpenAI, GHL, or an executor.
 
-## Health, readiness, and operations
+Back up the database and its WAL consistently with an operator-reviewed SQLite backup procedure.
+Test restoration separately. Encryption at rest, retention, off-host copies, access controls, and
+backup monitoring are deployment responsibilities. Never delete or replace a production database
+as part of automated release verification.
 
-- `GET /health` is public lightweight liveness and does no provider or database work.
-- `GET /ready` performs only bounded local SQLite readiness checks.
-- `GET /api/v1/admin/status` remains authenticated and ADMIN-only.
+## Docker deployment
 
-Structured JSON logs exclude credentials, headers, payloads, customer text, prompts, provider
-responses, database paths, and raw exceptions. External log collection, alerting, dashboards,
-backups, and uptime monitoring are operator responsibilities. Metrics and rate limiting reset on
-restart because they remain process-local.
+Build in a Docker-enabled environment:
 
-Only `ADD_CONTACT_TAG` exists. There is no generic HTTP or arbitrary URL capability, AI-directed
-execution, autonomous worker, scheduled action, or automatic replay of `UNKNOWN` executions.
+```text
+docker build --tag ai-business-automation:0.1.0 .
+```
 
-## Release verification
+Run one instance behind a trusted reverse proxy, publish only port 8000 as required, mount the data
+volume at `/app/data`, and inject `APP_` settings through the platform rather than a checked-in
+Compose file. The image uses `python:3.12.10-slim-bookworm`, exactly pinned runtime dependencies,
+an exec-form Uvicorn command, one worker, and fixed non-root UID/GID `10001:10001`.
 
-Run the test, coverage, lint, formatting, type, dependency-audit, security-source-scan, and
-`python scripts/verify_release.py` gates before a release. The verifier is static/local: it never
-contacts providers, modifies the repository, or opens a database.
+Before promotion, inspect the built configuration and process identity in that environment. Confirm
+the configured image user is `10001:10001`, the application can write only its mounted data
+location, the healthcheck succeeds, and no secret appears in image history or environment metadata.
+
+Static Docker checks are verified by `scripts/verify_release.py`. A successful live image build,
+runtime UID check, and healthcheck can only be reported when a Docker CLI and daemon are available;
+static validation is not a substitute for runtime verification.
+
+## Health, readiness, and shutdown
+
+- `GET /health` is public constant liveness. It does not access SQLite or external providers.
+- `GET /ready` performs only a bounded local SQLite schema/readiness check and returns HTTP 503
+  with closed `not_ready` status when persistence is unavailable.
+- `GET /api/v1/admin/status` is `ADMIN`-only and returns closed operational fields and process-local
+  metrics, never settings, paths, or credentials.
+
+The container healthcheck calls only `/health`. Configure the platform to stop routing traffic on
+termination and allow Uvicorn to receive the termination signal. Connections are operation-scoped;
+the application lifespan releases repository state on shutdown. There are no background workers,
+external retries, or queues to drain.
+
+## Network and HTTP expectations
+
+Terminate TLS at a trusted proxy or platform load balancer. Configure request/connection limits
+consistent with the application's bounded provider timeouts. CORS is disabled and must not be made
+permissive. All responses include `X-Content-Type-Options: nosniff`; protected responses disable
+caching. Uvicorn access and server-version headers are disabled in the container.
+
+The GHL destination is fixed to `https://services.leadconnectorhq.com` and the only operation is
+`POST /contacts/{contactId}/tags` with `Version: v3`. No environment or request field can override
+the origin, path, method, headers, bearer token, version, query, or body shape.
+
+OpenAI uses the server-owned allowlisted model, bounded input/output and timeout, strict structured
+output, no tools, storage disabled, and zero retries. Neither health nor readiness calls a provider.
+
+## Monitoring and operational safety
+
+Collect the structured JSON logs with an external system and alert on health/readiness, safe failure
+categories, authentication failures, execution `FAILED`/`UNKNOWN`, capacity, filesystem health,
+and backup results. The application itself does not provide log shipping, dashboards, alerting,
+distributed metrics, real-time external monitoring, or provider-health polling.
+
+Metrics contain fixed counters and aggregate latency only. They reset when the process restarts and
+do not aggregate across workers. Rate limits are also process-local and are not a substitute for
+reverse-proxy or perimeter controls.
+
+An `UNKNOWN` execution is terminal and is never automatically replayed. Investigate provider state
+manually before any operator-approved follow-up; this release has no reconciliation endpoint.
+
+## Release checks
+
+Run from a clean checkout:
+
+```text
+python -m pytest --cov
+python -m ruff check .
+python -m ruff format --check .
+python -m mypy
+python -m pip_audit .
+python scripts/security_scan.py
+python scripts/verify_release.py
+```
+
+The release verifier is static and local. It does not contact providers, mutate a database, modify
+the repository, create a release, or replace live Docker verification.

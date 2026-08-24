@@ -148,6 +148,12 @@ class SecurityAuditRepository:
         except (OSError, sqlite3.Error, ApprovalPersistenceError):
             return False
 
+    def close(self) -> None:
+        """Release repository lifecycle state after operation-scoped connections close."""
+
+        with self._initialization_lock:
+            self._initialized = False
+
     def verify(self) -> bool:
         self._initialize()
         connection = sqlite3.connect(self._database_path)

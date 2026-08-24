@@ -1,6 +1,6 @@
 # AI-Powered Business Automation & Intelligent Operations Platform
 
-This repository contains the secure Phase 8 operational-safety boundary for a business
+This repository contains the secure Phase 9 production deployment boundary for a business
 automation and intelligent operations platform. It normalizes bounded events, obtains strictly
 validated advisory AI analysis, evaluates deterministic policy, and records approval-required
 decisions before allowing one narrowly scoped external mutation.
@@ -19,7 +19,7 @@ decisions before allowing one narrowly scoped external mutation.
 >
 > **The provider adapter performs one fixed external mutation.**
 
-## Current Phase 8 scope
+## Current Phase 9 scope
 
 - Python 3.12 project using a `src` layout
 - Strict environment configuration through `APP_` variables
@@ -46,6 +46,8 @@ decisions before allowing one narrowly scoped external mutation.
 - Aggregate request latency without per-request history or dynamic metric labels
 - Sanitized, stable API errors and defensive response headers
 - Automated tests, security source scan, static analysis, dependency audit, and CI
+- Fail-closed production validation for credentials, policy, model, debug, and SQLite settings
+- Pinned non-root container deployment with static, non-mutating release verification
 
 ## Architecture
 
@@ -55,8 +57,8 @@ Configuration, logging, and security middleware are separated into focused packa
 networking is isolated to the OpenAI analysis adapter and the dedicated GHL adapter. Policy,
 approvals, execution authorization, models, and API routes perform no networking.
 
-See [Architecture](docs/architecture.md) and [Security](docs/security.md) for the trust boundaries
-and design rationale.
+See [Architecture](docs/architecture.md), [Security](docs/security.md), and
+[Production deployment](docs/deployment.md) for the trust boundaries and operating requirements.
 
 ## API overview
 
@@ -278,6 +280,7 @@ python -m ruff format --check .
 python -m mypy
 python -m pip_audit .
 python scripts/security_scan.py
+python scripts/verify_release.py
 ```
 
 Coverage is required to remain at or above 95%.
@@ -311,7 +314,7 @@ while excluding request/response bodies and secrets.
 
 ## Current limitations
 
-Phase 8 uses server-configured static bearer credentials rather than an external identity provider.
+Phase 9 uses server-configured static bearer credentials rather than an external identity provider.
 It has no queue, workflow engine, tool calling, AI memory, autonomous action selection, n8n
 integration, or other CRM mutation. SQLite persists approval,
 execution, audit, and action-parameter commitments; business

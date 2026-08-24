@@ -42,3 +42,6 @@ jobs:
 
       - name: Run focused security scan
         run: python scripts/security_scan.py
+
+      - name: Verify production release constraints
+        run: python scripts/verify_release.py

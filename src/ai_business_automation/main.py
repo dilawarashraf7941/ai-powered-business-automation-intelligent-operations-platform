@@ -1,5 +1,7 @@
 """FastAPI application factory and ASGI entrypoint."""
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
@@ -19,7 +21,7 @@ from ai_business_automation.api.errors import (
     validation_error_handler,
 )
 from ai_business_automation.api.routes import router
-from ai_business_automation.config import Settings, get_settings
+from ai_business_automation.config import Environment, Settings, get_settings
 from ai_business_automation.logging import configure_logging
 from ai_business_automation.providers import AIAnalysisError
 from ai_business_automation.repositories.security_audit import SecurityAuditRepository
@@ -104,10 +106,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     active_settings = settings or get_settings()
     configure_logging(active_settings.log_level)
+    metrics = OperationalMetrics()
+    security_audit = SecurityAuditRepository(Path(active_settings.approval_database_path))
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        if active_settings.environment is Environment.PRODUCTION and not security_audit.is_ready():
+            raise RuntimeError("production local persistence is unavailable")
+        try:
+            yield
+        finally:
+            security_audit.close()
+
     application = FastAPI(
         title="AI Business Automation Platform",
         version="0.1.0",
-        debug=False,
+        debug=active_settings.debug,
+        lifespan=lifespan,
     )
     application.add_exception_handler(RequestValidationError, _validation_error_adapter)
     application.add_exception_handler(HTTPException, _http_error_adapter)
@@ -123,8 +138,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.state.rate_limiter = ProcessRateLimiter(
         active_settings.auth_failure_limit, active_settings.protected_mutation_limit
     )
-    metrics = OperationalMetrics()
-    security_audit = SecurityAuditRepository(Path(active_settings.approval_database_path))
     application.state.metrics = metrics
     application.state.security_audit = security_audit
     application.state.readiness = LocalReadinessProbe(security_audit)

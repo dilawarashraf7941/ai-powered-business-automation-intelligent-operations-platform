@@ -11,7 +11,6 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr, ValidationError
-from tests.auth_helpers import authenticated_client
 
 import ai_business_automation.providers.openai as openai_module
 from ai_business_automation.api.routes import get_intelligence_service
@@ -44,6 +43,7 @@ from ai_business_automation.services.intelligence import (
     BusinessIntelligenceService,
 )
 from ai_business_automation.services.normalization import EventNormalizer
+from tests.auth_helpers import authenticated_client
 
 
 def valid_output(**updates: object) -> dict[str, object]:

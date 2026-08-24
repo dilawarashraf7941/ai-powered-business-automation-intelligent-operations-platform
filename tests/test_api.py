@@ -11,12 +11,12 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from tests.auth_helpers import authenticated_client
 
 from ai_business_automation.api import routes
 from ai_business_automation.config import Environment, Settings
 from ai_business_automation.logging import JsonFormatter
 from ai_business_automation.main import create_app
+from tests.auth_helpers import authenticated_client
 
 
 def test_health_is_minimal_and_safe(client: TestClient) -> None:

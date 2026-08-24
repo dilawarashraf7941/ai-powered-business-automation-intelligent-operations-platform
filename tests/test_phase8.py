@@ -183,7 +183,7 @@ def test_unknown_execution_reconciles_without_provider_replay(
     expected: ExecutionStatus,
 ) -> None:
     database = phase8_tmp_path / f"{outcome.value}.sqlite3"
-    approvals, _executions, reconciliation, repository, provider, execution_id = unknown_execution(
+    _approvals, _executions, reconciliation, repository, provider, execution_id = unknown_execution(
         database
     )
     before = provider.calls

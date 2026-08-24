@@ -1,4 +1,4 @@
-"""Source-level enforcement of Phase 4 capability exclusions."""
+"""Source-level enforcement of Phase 5 capability exclusions."""
 
 import ast
 import re
@@ -99,6 +99,26 @@ def test_decision_endpoint_accepts_only_the_strict_external_event() -> None:
     routes = (SOURCE / "ai_business_automation" / "api" / "routes.py").read_text(encoding="utf-8")
     assert "async def decide_event(\n    event: ExternalEvent," in routes
     assert "event: PolicyDecision" not in routes
+
+
+def test_sqlite_and_sql_are_confined_to_repository_adapter() -> None:
+    sqlite_importers: set[str] = set()
+    for path in SOURCE.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import) and any(
+                alias.name.split(".")[0] == "sqlite3" for alias in node.names
+            ):
+                sqlite_importers.add(path.relative_to(ROOT).as_posix())
+    assert sqlite_importers == {"src/ai_business_automation/repositories/approvals.py"}
+    routes = (SOURCE / "ai_business_automation" / "api" / "routes.py").read_text(encoding="utf-8")
+    for sql_keyword in ("SELECT ", "INSERT ", "UPDATE ", "DELETE ", "PRAGMA "):
+        assert sql_keyword not in routes
+
+
+def test_database_artifacts_are_ignored() -> None:
+    ignore = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert {"*.sqlite3", "*.sqlite3-shm", "*.sqlite3-wal"}.issubset(set(ignore))
 
 
 def test_environment_file_is_ignored_and_not_tracked() -> None:

@@ -9,6 +9,7 @@ from starlette.exceptions import HTTPException
 
 from ai_business_automation.models.events import PayloadLimitError, UnsafePayloadError
 from ai_business_automation.providers import AIAnalysisError
+from ai_business_automation.services.approval_errors import ApprovalError
 from ai_business_automation.services.normalization import EventNormalizationError
 
 _LOGGER = logging.getLogger("ai_business_automation.events")
@@ -34,6 +35,9 @@ def error_response(request: Request, status: int, code: str, message: str) -> JS
         "/api/v1/events/decide": "decide_event",
     }
     operation = operation_by_path.get(str(request.scope.get("path", "")))
+    path = str(request.scope.get("path", ""))
+    if operation is None and path.startswith("/api/v1/approvals"):
+        operation = "approval_operation"
     if request.method == "POST" and operation is not None:
         _LOGGER.info(
             "event_rejected",
@@ -51,6 +55,13 @@ def error_response(request: Request, status: int, code: str, message: str) -> JS
 
 
 async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    if str(request.scope.get("path", "")).startswith("/api/v1/approvals"):
+        return error_response(
+            request,
+            422,
+            "APPROVAL_VALIDATION_ERROR",
+            "Approval input is invalid.",
+        )
     code = _validation_error_code(exc)
     return error_response(request, 422, code, _ERROR_MESSAGES[code])
 
@@ -92,6 +103,10 @@ async def ai_analysis_error_handler(request: Request, exc: AIAnalysisError) -> J
         "AI_UNAVAILABLE": 503,
     }
     return error_response(request, status_by_code[exc.code], exc.code, exc.safe_message)
+
+
+async def approval_error_handler(request: Request, exc: ApprovalError) -> JSONResponse:
+    return error_response(request, exc.status_code, exc.code, exc.safe_message)
 
 
 async def http_error_handler(request: Request, exc: HTTPException) -> JSONResponse:

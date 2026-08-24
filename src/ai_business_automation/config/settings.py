@@ -33,11 +33,26 @@ class Settings(BaseSettings):
     ai_max_input_bytes: int = Field(default=8_192, ge=1_024, le=16_384)
     ai_max_output_tokens: int = Field(default=800, ge=128, le=2_048)
     policy_confidence_threshold: float = Field(default=0.85, ge=0.0, le=1.0)
+    approval_database_path: str = Field(
+        default="approvals.sqlite3",
+        min_length=9,
+        max_length=240,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.\\/-]*\.sqlite3$",
+    )
+    approval_ttl_seconds: int = Field(default=1_800, ge=60, le=86_400)
+    approver_id: str = Field(
+        default="development-approver",
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
 
     @model_validator(mode="after")
     def require_production_ai_credentials(self) -> "Settings":
         if self.environment is Environment.PRODUCTION and self.openai_api_key is None:
             raise ValueError("production requires AI provider credentials")
+        if ".." in self.approval_database_path.replace("\\", "/").split("/"):
+            raise ValueError("approval database path cannot traverse parent directories")
         return self
 
 

@@ -1,8 +1,9 @@
 # AI-Powered Business Automation & Intelligent Operations Platform
 
-This repository contains the secure Phase 4 deterministic decision boundary for a future business
+This repository contains the secure Phase 5 human-approval boundary for a future business
 automation and intelligent operations platform. It normalizes bounded events, obtains strictly
-validated advisory AI analysis, and evaluates that analysis through a closed, versioned policy.
+validated advisory AI analysis, evaluates deterministic policy, and records approval-required
+decisions without executing them.
 
 > **AI IS ADVISORY ONLY.**
 >
@@ -14,9 +15,9 @@ validated advisory AI analysis, and evaluates that analysis through a closed, ve
 >
 > **NO WORKFLOW EXECUTION IS IMPLEMENTED.**
 >
-> **AI recommends. Policy decides. Execution is a separate future boundary.**
+> **AI recommends. Policy decides. Human approves. Execution is a separate future boundary.**
 
-## Current Phase 4 scope
+## Current Phase 5 scope
 
 - Python 3.12 project using a `src` layout
 - Strict environment configuration through `APP_` variables
@@ -28,6 +29,8 @@ validated advisory AI analysis, and evaluates that analysis through a closed, ve
 - Bounded, server-owned prompt policy and strict structured AI output
 - Pure deterministic policy version `1.0` with a server-owned `0.85` confidence threshold
 - Closed decisions, recommended actions, risk levels, and bounded explanatory evidence
+- Transactional local SQLite approval records with a server-owned 30-minute default TTL
+- Canonical SHA-256 provenance commitments and an application-enforced audit hash chain
 - Stable provider failure categories with a 1–60 second timeout range and no retries
 - 16 KiB request-body ceiling enforced before framework body parsing
 - Safe JSON request-completion logs and server-generated correlation IDs
@@ -39,7 +42,7 @@ validated advisory AI analysis, and evaluates that analysis through a closed, ve
 The API layer accepts HTTP input and maps it into strict Pydantic models. Side-effect-free services
 normalize and classify events, isolate advisory AI access, and apply deterministic policy.
 Configuration, logging, and security middleware are separated into focused packages. The fixed
-OpenAI adapter is the only outbound boundary; policy evaluation performs no networking.
+OpenAI adapter is the only outbound boundary; policy and approval persistence perform no networking.
 
 See [Architecture](docs/architecture.md) and [Security](docs/security.md) for the trust boundaries
 and design rationale.
@@ -117,6 +120,35 @@ approval. Identity/category mismatches, invalid versions, missing AI reasons, an
 `NONE` plus high-priority/high-urgency signals are denied. Evidence uses only closed codes and
 bounded enum or confidence values; it never contains payloads, prompts, reasons, or secrets.
 
+## Human approval records
+
+`POST /api/v1/approvals` accepts the strict external event, runs the existing normalization and AI
+boundaries, and recomputes policy internally. Only `REQUIRE_HUMAN_APPROVAL` creates a `PENDING`
+record. `ALLOW` and `DENY` return `POLICY_VALIDATION_FAILED` and create nothing. Clients cannot
+submit approval IDs, policy fields, timestamps, expiry, approver identity, or provenance hashes.
+
+`GET /api/v1/approvals/{approval_id}` returns bounded metadata. A pending record read at or after
+expiry is atomically persisted as `EXPIRED`. `POST .../approve` permits only `PENDING → APPROVED`;
+`POST .../reject` permits only `PENDING → REJECTED` and requires a sanitized reason of at most 500
+characters. No terminal state can transition again.
+
+Approval IDs and audit IDs use cryptographically secure randomness. TTL defaults to 1,800 seconds
+and is bounded to 60–86,400 seconds through `APP_APPROVAL_TTL_SECONDS`. The database location is a
+validated server-owned relative `.sqlite3` path. `APP_APPROVER_ID` is a bounded development/server
+identity only; it is not authentication and is never accepted from request bodies.
+
+Full canonical events and intelligence are hashed but not stored. The trusted provenance record
+stores SHA-256 digest commitments for those canonical representations plus event identity/type,
+source, confidence, policy version, decision, action, risk, and closed evidence. Its deterministic
+UTF-8 canonical JSON is hashed again as the lowercase 64-character `provenance_hash` and verified
+before every transition.
+
+SQLite uses foreign keys, WAL mode, a busy timeout, `BEGIN IMMEDIATE`, parameterized SQL, and
+pending-only conditional updates. Each lifecycle change appends a SHA-256-linked audit event. The
+approval row stores the expected audit count and head hash so deletion of the final event is also
+detectable. Audit verification detects modification, deletion, reordering, broken links, and
+duplicate identities.
+
 ## Event normalization and classification
 
 Supported event types are `CUSTOMER_REQUEST`, `CUSTOMER_MESSAGE`, `CUSTOMER_CREATED`,
@@ -190,11 +222,11 @@ Coverage is required to remain at or above 95%.
 
 ## Current limitations
 
-Phase 4 intentionally has no authentication, database, queue, event persistence, business
-integration, workflow engine, tool calling, AI memory, or autonomous action mechanism. The only
-outbound boundary is the fixed OpenAI provider adapter. Analysis is advisory and does not promise
-durable or idempotent processing. Human approvals are not persisted or performed. No action is
-executed.
+Phase 5 intentionally has no real authentication, queue, business integration, workflow engine,
+tool calling, AI memory, or autonomous action mechanism. SQLite persists only approval and audit
+metadata; business events and AI content are not stored. The fixed OpenAI provider adapter remains
+the only outbound boundary. An approved record is not an execution authorization token and no
+action is executed.
 
 ## Roadmap
 

@@ -3,11 +3,21 @@
 import logging
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, Path, Request, status
 from pydantic import BaseModel, ConfigDict
 
-from ai_business_automation.models import BusinessIntelligenceResult, PolicyDecision
+from ai_business_automation.models import (
+    ApprovalResponse,
+    BusinessIntelligenceResult,
+    EmptyApprovalTransitionRequest,
+    PolicyDecision,
+    RejectionRequest,
+)
 from ai_business_automation.models.events import EventAcknowledgement, ExternalEvent
+from ai_business_automation.services.approval_factory import (
+    get_approval_service as _get_approval_service,
+)
+from ai_business_automation.services.approvals import ApprovalService
 from ai_business_automation.services.events import EventIngestionService
 from ai_business_automation.services.intelligence import BusinessIntelligenceService
 from ai_business_automation.services.intelligence_factory import (
@@ -33,6 +43,10 @@ def get_intelligence_service() -> BusinessIntelligenceService:
 
 def get_policy_service() -> PolicyDecisionService:
     return _get_policy_service()
+
+
+def get_approval_service() -> ApprovalService:
+    return _get_approval_service()
 
 
 class HealthResponse(BaseModel):
@@ -124,3 +138,96 @@ async def decide_event(
         },
     )
     return result
+
+
+@router.post(
+    "/api/v1/approvals",
+    response_model=ApprovalResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["approvals"],
+)
+async def create_approval(
+    event: ExternalEvent,
+    request: Request,
+    approvals: Annotated[ApprovalService, Depends(get_approval_service)],
+    intelligence: Annotated[BusinessIntelligenceService, Depends(get_intelligence_service)],
+    ingestion: Annotated[EventIngestionService, Depends(get_ingestion_service)],
+) -> ApprovalResponse:
+    """Recompute intelligence and policy, then record approval without executing anything."""
+
+    normalized = ingestion.ingest(event)
+    analysis = await intelligence.analyze(normalized.event, normalized.category)
+    result = approvals.create(normalized.event, analysis).public()
+    _log_approval_response(request, result, "approval_created")
+    return result
+
+
+@router.get(
+    "/api/v1/approvals/{approval_id}",
+    response_model=ApprovalResponse,
+    tags=["approvals"],
+)
+async def get_approval(
+    approval_id: Annotated[
+        str, Path(min_length=24, max_length=40, pattern=r"^apr_[A-Za-z0-9_-]+$")
+    ],
+    request: Request,
+    approvals: Annotated[ApprovalService, Depends(get_approval_service)],
+) -> ApprovalResponse:
+    result = approvals.get(approval_id).public()
+    _log_approval_response(request, result, "approval_read")
+    return result
+
+
+@router.post(
+    "/api/v1/approvals/{approval_id}/approve",
+    response_model=ApprovalResponse,
+    tags=["approvals"],
+)
+async def approve_approval(
+    approval_id: Annotated[
+        str, Path(min_length=24, max_length=40, pattern=r"^apr_[A-Za-z0-9_-]+$")
+    ],
+    request: Request,
+    approvals: Annotated[ApprovalService, Depends(get_approval_service)],
+    transition: EmptyApprovalTransitionRequest | None = None,
+) -> ApprovalResponse:
+    del transition
+    result = approvals.approve(approval_id).public()
+    _log_approval_response(request, result, "approval_approved")
+    return result
+
+
+@router.post(
+    "/api/v1/approvals/{approval_id}/reject",
+    response_model=ApprovalResponse,
+    tags=["approvals"],
+)
+async def reject_approval(
+    approval_id: Annotated[
+        str, Path(min_length=24, max_length=40, pattern=r"^apr_[A-Za-z0-9_-]+$")
+    ],
+    rejection: RejectionRequest,
+    request: Request,
+    approvals: Annotated[ApprovalService, Depends(get_approval_service)],
+) -> ApprovalResponse:
+    result = approvals.reject(approval_id, rejection.reason).public()
+    _log_approval_response(request, result, "approval_rejected")
+    return result
+
+
+def _log_approval_response(request: Request, result: ApprovalResponse, event_name: str) -> None:
+    _LOGGER.info(
+        event_name,
+        extra={
+            "request_id": str(request.state.request_id),
+            "approval_id": result.approval_id,
+            "event_id": result.event_id,
+            "status": result.status.value,
+            "decision": result.decision.value,
+            "action": result.action.value,
+            "risk": result.risk.value,
+            "policy_version": result.policy_version,
+            "outcome": "success",
+        },
+    )

@@ -1,4 +1,4 @@
-"""Source-level enforcement of Phase 5 capability exclusions."""
+"""Source-level enforcement of Phase 6 execution capability exclusions."""
 
 import ast
 import re
@@ -101,6 +101,48 @@ def test_decision_endpoint_accepts_only_the_strict_external_event() -> None:
     assert "event: PolicyDecision" not in routes
 
 
+def test_execution_endpoint_accepts_only_a_strict_approval_reference() -> None:
+    routes = (SOURCE / "ai_business_automation" / "api" / "routes.py").read_text(encoding="utf-8")
+    models = (SOURCE / "ai_business_automation" / "models" / "executions.py").read_text(
+        encoding="utf-8"
+    )
+    assert "execution_request: ExecutionRequest" in routes
+    assert "approval_id: ApprovalId" in models
+    for prohibited in ("url:", "method:", "headers:", "command:", "callable:", "module:"):
+        assert prohibited not in models
+
+
+def test_internal_action_boundary_has_no_network_provider_or_dynamic_imports() -> None:
+    action_paths = [
+        SOURCE / "ai_business_automation" / "services" / "actions.py",
+        SOURCE / "ai_business_automation" / "services" / "executions.py",
+    ]
+    forbidden_roots = {
+        "openai",
+        "requests",
+        "httpx",
+        "urllib",
+        "socket",
+        "subprocess",
+        "os",
+        "importlib",
+    }
+    for path in action_paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        roots = {
+            alias.name.split(".")[0]
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        }
+        roots.update(
+            (node.module or "").split(".")[0]
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+        )
+        assert roots.isdisjoint(forbidden_roots)
+
+
 def test_sqlite_and_sql_are_confined_to_repository_adapter() -> None:
     sqlite_importers: set[str] = set()
     for path in SOURCE.rglob("*.py"):
@@ -110,7 +152,10 @@ def test_sqlite_and_sql_are_confined_to_repository_adapter() -> None:
                 alias.name.split(".")[0] == "sqlite3" for alias in node.names
             ):
                 sqlite_importers.add(path.relative_to(ROOT).as_posix())
-    assert sqlite_importers == {"src/ai_business_automation/repositories/approvals.py"}
+    assert sqlite_importers == {
+        "src/ai_business_automation/repositories/approvals.py",
+        "src/ai_business_automation/repositories/executions.py",
+    }
     routes = (SOURCE / "ai_business_automation" / "api" / "routes.py").read_text(encoding="utf-8")
     for sql_keyword in ("SELECT ", "INSERT ", "UPDATE ", "DELETE ", "PRAGMA "):
         assert sql_keyword not in routes

@@ -79,9 +79,18 @@ CREATE TABLE IF NOT EXISTS approval_audit_events (
     sequence_number INTEGER NOT NULL CHECK(sequence_number >= 1),
     event_type TEXT NOT NULL CHECK(event_type IN (
         'APPROVAL_CREATED', 'APPROVAL_APPROVED', 'APPROVAL_REJECTED',
-        'APPROVAL_EXPIRED', 'APPROVAL_TRANSITION_REJECTED'
+        'APPROVAL_EXPIRED', 'APPROVAL_TRANSITION_REJECTED',
+        'EXECUTION_CREATED', 'EXECUTION_CLAIMED', 'EXECUTION_SUCCEEDED',
+        'EXECUTION_FAILED', 'EXECUTION_UNKNOWN', 'EXECUTION_REJECTED'
     )),
-    status TEXT NOT NULL CHECK(status IN ('PENDING', 'APPROVED', 'REJECTED', 'EXPIRED')),
+    execution_id TEXT CHECK(
+        execution_id IS NULL OR length(execution_id) BETWEEN 24 AND 40
+    ),
+    event_id TEXT CHECK(event_id IS NULL OR length(event_id) BETWEEN 20 AND 40),
+    status TEXT NOT NULL CHECK(status IN (
+        'PENDING', 'APPROVED', 'REJECTED', 'EXPIRED',
+        'CLAIMED', 'SUCCEEDED', 'FAILED', 'UNKNOWN'
+    )),
     actor_id TEXT NOT NULL CHECK(length(actor_id) BETWEEN 1 AND 64),
     occurred_at TEXT NOT NULL CHECK(length(occurred_at) BETWEEN 20 AND 40),
     previous_event_hash TEXT NOT NULL CHECK(length(previous_event_hash) = 64),
@@ -386,6 +395,8 @@ class SQLiteApprovalRepository:
             expected_hash = audit_event_hash(
                 audit_event_id=event.audit_event_id,
                 approval_id=event.approval_id,
+                execution_id=event.execution_id,
+                event_id=event.event_id,
                 sequence_number=event.sequence_number,
                 event_type=event.event_type,
                 status=event.status,
@@ -444,17 +455,21 @@ class SQLiteApprovalRepository:
         *,
         approval_id: str,
         event_type: AuditEventType,
-        status: ApprovalStatus,
+        status: ApprovalStatus | str,
         actor_id: str,
         occurred_at: datetime,
         previous_hash: str,
         sequence_number: int,
+        execution_id: str | None = None,
+        event_id: str | None = None,
     ) -> None:
         audit_event_id = self._audit_id_factory()
         occurred_text = _datetime_text(occurred_at)
         event_hash = audit_event_hash(
             audit_event_id=audit_event_id,
             approval_id=approval_id,
+            execution_id=execution_id,
+            event_id=event_id,
             sequence_number=sequence_number,
             event_type=event_type,
             status=status,
@@ -465,16 +480,19 @@ class SQLiteApprovalRepository:
         connection.execute(
             """
             INSERT INTO approval_audit_events (
-                audit_event_id, approval_id, sequence_number, event_type, status,
-                actor_id, occurred_at, previous_event_hash, event_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                audit_event_id, approval_id, sequence_number, event_type,
+                execution_id, event_id, status, actor_id, occurred_at,
+                previous_event_hash, event_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 audit_event_id,
                 approval_id,
                 sequence_number,
                 event_type.value,
-                status.value,
+                execution_id,
+                event_id,
+                status.value if isinstance(status, ApprovalStatus) else status,
                 actor_id,
                 occurred_text,
                 previous_hash,
@@ -559,9 +577,11 @@ def _audit_from_row(row: sqlite3.Row) -> AuditEvent:
     return AuditEvent(
         audit_event_id=str(row["audit_event_id"]),
         approval_id=str(row["approval_id"]),
+        execution_id=(str(row["execution_id"]) if row["execution_id"] is not None else None),
+        event_id=str(row["event_id"]) if row["event_id"] is not None else None,
         sequence_number=int(row["sequence_number"]),
         event_type=AuditEventType(row["event_type"]),
-        status=ApprovalStatus(row["status"]),
+        status=str(row["status"]),
         actor_id=str(row["actor_id"]),
         occurred_at=_datetime(row["occurred_at"]),
         previous_event_hash=str(row["previous_event_hash"]),

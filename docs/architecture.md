@@ -1,8 +1,9 @@
 # Architecture
 
-Phase 5 adds trusted human approval recording after deterministic policy. No action is executed.
+Phase 6 adds a controlled execution boundary after trusted human approval. Only allowlisted local
+application actions can execute; no external business action exists.
 
-## Phase 5 shape
+## Phase 6 shape
 
 The project uses a compact `src` layout with responsibilities split by boundary:
 
@@ -10,10 +11,10 @@ The project uses a compact `src` layout with responsibilities split by boundary:
 | --- | --- |
 | `main.py` | Application construction and explicit middleware/handler registration |
 | `api/` | HTTP routes and stable public error contracts |
-| `models/` | Strict events, intelligence, policy results, and closed taxonomies |
-| `services/` | Normalization, advisory analysis, and pure deterministic policy |
+| `models/` | Strict events, intelligence, policy, approval, execution, and action schemas |
+| `services/` | Advisory analysis, deterministic policy, approval, and fixed local action handlers |
 | `providers/` | Provider protocol, stable failures, and isolated OpenAI adapter |
-| `repositories/` | Provider-neutral approval contract and transactional SQLite adapter |
+| `repositories/` | Provider-neutral approval/execution contracts and transactional SQLite adapters |
 | `config/` | Validated server-owned settings |
 | `logging/` | Allowlisted JSON log serialization and reusable redaction |
 | `security/` | Request-size enforcement, correlation IDs, and response headers |
@@ -88,8 +89,8 @@ priority, high urgency, unknown intent, and `CONTACT_HUMAN`, `REQUEST_INFORMATIO
 `SCHEDULE_CONSULTATION`, or `NURTURE` require human approval. Clean `NONE` and low-risk `REVIEW`
 produce `ALLOW`. `ESCALATE` and high signals elevate risk deterministically.
 
-`ALLOW` is a policy result, not an execution command. Action execution, workflow, integration, and
-automation layers remain absent; Phase 5 adds only bounded human-approval persistence.
+`ALLOW` is a policy result, not an execution command. Phase 6 execution requires a persisted human
+approval where policy required one; workflow engines and external integrations remain absent.
 
 ## Human approval boundary
 
@@ -115,7 +116,33 @@ Each creation, transition, expiry, and rejected transition appends an audit even
 previous hash, event hash, unique audit ID, stored count, and stored head are verified together by
 an internal service before authorization.
 
-**AI recommends. Policy decides. Human approves. Execution is a separate future boundary.**
+## Controlled execution boundary
+
+The execution API accepts only an approval reference. `SQLiteExecutionRepository.claim` starts
+`BEGIN IMMEDIATE`, verifies the full approval provenance and audit chain, requires `APPROVED` before
+the server-owned expiry, rejects any prior execution for that approval, derives the internal action
+from a closed mapping, writes `PENDING`, and conditionally changes it to `CLAIMED`. A unique
+`approval_id` constraint and affected-row check make claiming single-use under concurrent requests.
+
+`ActionRegistry` is immutable application code containing exactly five concrete handlers:
+`NO_OP`, `CREATE_INTERNAL_TASK`, `UPDATE_INTERNAL_STATUS`, `REQUEST_HUMAN_REVIEW`, and
+`GENERATE_INTERNAL_NOTE`. Each handler receives a server-reconstructed `ActionContext`, builds one
+strict bounded input model, and returns one bounded local effect. No API value can select a handler,
+callable, module, plugin, URL, provider, method, headers, body, command, timeout, or retry policy.
+
+The lifecycle is `PENDING → CLAIMED → SUCCEEDED | FAILED | UNKNOWN`. Local effects and successful
+completion commit together. `FAILED` is definitive non-completion; `UNKNOWN` means completion cannot
+be established. Neither state retries automatically, and every terminal state is final. The current
+handlers are deterministic and local, while `UNKNOWN` preserves safe future provider semantics.
+
+Execution events reuse the approval audit chain and canonical SHA-256 event hashing. The existing
+approval row count/head commitment covers `EXECUTION_CREATED`, `EXECUTION_CLAIMED`,
+`EXECUTION_SUCCEEDED`, `EXECUTION_FAILED`, `EXECUTION_UNKNOWN`, and `EXECUTION_REJECTED`. Execution
+rows and typed internal effects also carry deterministic SHA-256 integrity commitments.
+
+**AI recommends. Policy decides. Human approves. Executor performs only allowlisted internal actions.**
+
+**External business integrations are future work.**
 
 ## Future AI evolution
 
@@ -123,9 +150,9 @@ The AI boundary remains analysis-only. Any future expansion requires separate bu
 model allowlists, audit policy, authorization, and threat modeling. Untrusted event data and model
 output must never gain authority merely because a model processed or generated them.
 
-## Future workflow boundary
+## Future integration boundary
 
-No workflow engine or action runner exists. A future workflow boundary must separate proposals from
-authorized actions and use server-owned workflow identifiers, typed parameters, tenant-aware
-authorization, idempotency, approval gates, and immutable audit records. Neither event fields nor AI
-output may select arbitrary tools or destinations.
+No external workflow or provider adapter exists for actions. A future integration boundary must use
+specific provider-owned schemas, authenticated tenant authorization, reconciliation, and separate
+delivery guarantees behind this allowlisted boundary. Neither event fields nor AI output may select
+arbitrary tools or destinations.

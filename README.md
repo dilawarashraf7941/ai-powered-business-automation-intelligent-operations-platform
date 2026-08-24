@@ -1,23 +1,25 @@
 # AI-Powered Business Automation & Intelligent Operations Platform
 
-This repository contains the secure Phase 5 human-approval boundary for a future business
+This repository contains the secure Phase 6 controlled internal-execution boundary for a future business
 automation and intelligent operations platform. It normalizes bounded events, obtains strictly
 validated advisory AI analysis, evaluates deterministic policy, and records approval-required
-decisions without executing them.
+decisions before allowing only fixed local application actions.
 
 > **AI IS ADVISORY ONLY.**
 >
-> **AI CANNOT EXECUTE BUSINESS ACTIONS, CALL GHL OR N8N, OR INVOKE TOOLS.**
+> **AI CANNOT SELECT OR EXECUTE ACTIONS, CALL GHL OR N8N, OR INVOKE TOOLS.**
 >
 > **NO EXTERNAL BUSINESS INTEGRATIONS ARE IMPLEMENTED.**
 >
-> **NO AUTONOMOUS ACTIONS ARE IMPLEMENTED.**
+> **ONLY SERVER-ALLOWLISTED INTERNAL ACTIONS ARE IMPLEMENTED.**
 >
-> **NO WORKFLOW EXECUTION IS IMPLEMENTED.**
+> **NO EXTERNAL WORKFLOW EXECUTION IS IMPLEMENTED.**
 >
-> **AI recommends. Policy decides. Human approves. Execution is a separate future boundary.**
+> **AI recommends. Policy decides. Human approves. Executor performs only allowlisted internal actions.**
+>
+> **External business integrations are future work.**
 
-## Current Phase 5 scope
+## Current Phase 6 scope
 
 - Python 3.12 project using a `src` layout
 - Strict environment configuration through `APP_` variables
@@ -31,6 +33,8 @@ decisions without executing them.
 - Closed decisions, recommended actions, risk levels, and bounded explanatory evidence
 - Transactional local SQLite approval records with a server-owned 30-minute default TTL
 - Canonical SHA-256 provenance commitments and an application-enforced audit hash chain
+- Single-use internal execution records with atomic SQLite claiming
+- A static registry of five bounded local action handlers with no networking or shell access
 - Stable provider failure categories with a 1–60 second timeout range and no retries
 - 16 KiB request-body ceiling enforced before framework body parsing
 - Safe JSON request-completion logs and server-generated correlation IDs
@@ -42,7 +46,8 @@ decisions without executing them.
 The API layer accepts HTTP input and maps it into strict Pydantic models. Side-effect-free services
 normalize and classify events, isolate advisory AI access, and apply deterministic policy.
 Configuration, logging, and security middleware are separated into focused packages. The fixed
-OpenAI adapter is the only outbound boundary; policy and approval persistence perform no networking.
+OpenAI adapter remains the only outbound boundary; policy, approvals, and actions perform no
+networking.
 
 See [Architecture](docs/architecture.md) and [Security](docs/security.md) for the trust boundaries
 and design rationale.
@@ -149,6 +154,31 @@ approval row stores the expected audit count and head hash so deletion of the fi
 detectable. Audit verification detects modification, deletion, reordering, broken links, and
 duplicate identities.
 
+## Controlled internal action execution
+
+`POST /api/v1/actions/execute` accepts exactly `{ "approval_id": "..." }`. The server reloads the
+approval, verifies the approval and audit hash chains, requires `APPROVED` status before TTL expiry,
+and reconstructs the action from a fixed policy-to-action mapping. Clients cannot provide the
+execution ID, action, URL, method, headers, body, credentials, command, module, callable, provider,
+timeout, retry policy, or actor.
+
+The closed execution actions are `NO_OP`, `CREATE_INTERNAL_TASK`, `UPDATE_INTERNAL_STATUS`,
+`REQUEST_HUMAN_REVIEW`, and `GENERATE_INTERNAL_NOTE`. A static server-owned registry binds each enum
+to one deterministic Python handler. Handler inputs and effects are strict bounded models; effects
+are local SQLite records only. There is no runtime registration, dynamic import, plugin loading,
+generic HTTP client, shell, subprocess, provider call, or client-selected callable.
+
+Execution follows `PENDING → CLAIMED → SUCCEEDED | FAILED | UNKNOWN`. Creation and claim occur in
+one `BEGIN IMMEDIATE` transaction with a unique approval reference and conditional pending-only
+update. Each approval is single-use: terminal results cannot replay, and `FAILED` or `UNKNOWN`
+results are never retried automatically. `UNKNOWN` deliberately means completion cannot be
+established and requires future reconciliation rather than replay.
+
+`GET /api/v1/actions/executions/{execution_id}` returns only bounded execution metadata. Execution
+records and typed local effects have SHA-256 integrity commitments. Created, claimed, succeeded,
+failed, unknown, and rejected events extend the existing per-approval audit hash chain without
+storing event payloads, AI content, provider responses, or credentials.
+
 ## Event normalization and classification
 
 Supported event types are `CUSTOMER_REQUEST`, `CUSTOMER_MESSAGE`, `CUSTOMER_CREATED`,
@@ -222,11 +252,12 @@ Coverage is required to remain at or above 95%.
 
 ## Current limitations
 
-Phase 5 intentionally has no real authentication, queue, business integration, workflow engine,
-tool calling, AI memory, or autonomous action mechanism. SQLite persists only approval and audit
-metadata; business events and AI content are not stored. The fixed OpenAI provider adapter remains
-the only outbound boundary. An approved record is not an execution authorization token and no
-action is executed.
+Phase 6 intentionally has no real authentication, queue, external business integration, workflow
+engine, tool calling, AI memory, or autonomous action selection. SQLite persists approval,
+execution, audit, and bounded internal-effect metadata; business events and AI content are not
+stored. The fixed OpenAI provider adapter remains the only outbound boundary. Internal execution is
+single-process and local; there is no distributed lock, retry worker, reconciliation process, or
+external provider delivery guarantee.
 
 ## Roadmap
 

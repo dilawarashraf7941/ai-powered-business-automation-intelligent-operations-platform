@@ -10,6 +10,8 @@ from ai_business_automation.models import (
     ApprovalResponse,
     BusinessIntelligenceResult,
     EmptyApprovalTransitionRequest,
+    ExecutionRequest,
+    ExecutionResponse,
     PolicyDecision,
     RejectionRequest,
 )
@@ -19,6 +21,10 @@ from ai_business_automation.services.approval_factory import (
 )
 from ai_business_automation.services.approvals import ApprovalService
 from ai_business_automation.services.events import EventIngestionService
+from ai_business_automation.services.execution_factory import (
+    get_execution_service as _get_execution_service,
+)
+from ai_business_automation.services.executions import ExecutionService
 from ai_business_automation.services.intelligence import BusinessIntelligenceService
 from ai_business_automation.services.intelligence_factory import (
     get_intelligence_service as _get_intelligence_service,
@@ -47,6 +53,10 @@ def get_policy_service() -> PolicyDecisionService:
 
 def get_approval_service() -> ApprovalService:
     return _get_approval_service()
+
+
+def get_execution_service() -> ExecutionService:
+    return _get_execution_service()
 
 
 class HealthResponse(BaseModel):
@@ -228,6 +238,58 @@ def _log_approval_response(request: Request, result: ApprovalResponse, event_nam
             "action": result.action.value,
             "risk": result.risk.value,
             "policy_version": result.policy_version,
+            "outcome": "success",
+        },
+    )
+
+
+@router.post(
+    "/api/v1/actions/execute",
+    response_model=ExecutionResponse,
+    tags=["actions"],
+)
+async def execute_action(
+    execution_request: ExecutionRequest,
+    request: Request,
+    executions: Annotated[ExecutionService, Depends(get_execution_service)],
+) -> ExecutionResponse:
+    """Execute only the server-derived allowlisted action bound to an approved record."""
+
+    result = executions.execute(execution_request.approval_id).public()
+    _log_execution_response(request, result, "execution_completed")
+    return result
+
+
+@router.get(
+    "/api/v1/actions/executions/{execution_id}",
+    response_model=ExecutionResponse,
+    tags=["actions"],
+)
+async def get_execution(
+    execution_id: Annotated[
+        str, Path(min_length=24, max_length=40, pattern=r"^exe_[A-Za-z0-9_-]+$")
+    ],
+    request: Request,
+    executions: Annotated[ExecutionService, Depends(get_execution_service)],
+) -> ExecutionResponse:
+    result = executions.get(execution_id).public()
+    _log_execution_response(request, result, "execution_read")
+    return result
+
+
+def _log_execution_response(request: Request, result: ExecutionResponse, event_name: str) -> None:
+    _LOGGER.info(
+        event_name,
+        extra={
+            "request_id": str(request.state.request_id),
+            "execution_id": result.execution_id,
+            "approval_id": result.approval_id,
+            "event_id": result.event_id,
+            "action": result.action.value,
+            "status": result.status.value,
+            "result_code": (
+                result.result_code.value if result.result_code is not None else "PENDING"
+            ),
             "outcome": "success",
         },
     )

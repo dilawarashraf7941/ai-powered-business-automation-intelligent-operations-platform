@@ -50,6 +50,12 @@ class AuditEventType(StrEnum):
     APPROVAL_REJECTED = "APPROVAL_REJECTED"
     APPROVAL_EXPIRED = "APPROVAL_EXPIRED"
     APPROVAL_TRANSITION_REJECTED = "APPROVAL_TRANSITION_REJECTED"
+    EXECUTION_CREATED = "EXECUTION_CREATED"
+    EXECUTION_CLAIMED = "EXECUTION_CLAIMED"
+    EXECUTION_SUCCEEDED = "EXECUTION_SUCCEEDED"
+    EXECUTION_FAILED = "EXECUTION_FAILED"
+    EXECUTION_UNKNOWN = "EXECUTION_UNKNOWN"
+    EXECUTION_REJECTED = "EXECUTION_REJECTED"
 
 
 type ApprovalId = Annotated[
@@ -196,9 +202,15 @@ class AuditEvent(BaseModel):
 
     audit_event_id: AuditEventId
     approval_id: ApprovalId
+    execution_id: str | None = Field(
+        default=None, min_length=24, max_length=40, pattern=r"^exe_[A-Za-z0-9_-]+$"
+    )
+    event_id: EventId | None = None
     sequence_number: int = Field(ge=1, le=1_000_000)
     event_type: AuditEventType
-    status: ApprovalStatus
+    status: str = Field(
+        pattern=r"^(?:PENDING|APPROVED|REJECTED|EXPIRED|CLAIMED|SUCCEEDED|FAILED|UNKNOWN)$"
+    )
     actor_id: ActorId
     occurred_at: AwareDatetime
     previous_event_hash: Sha256Hex

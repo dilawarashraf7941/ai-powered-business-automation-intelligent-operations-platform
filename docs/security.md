@@ -81,10 +81,10 @@ allowlist; wildcard CORS is not acceptable.
 
 Production code contains no dynamic evaluation, shell or subprocess access, arbitrary imports,
 generic HTTP client, client-controlled URL construction, external business integration, workflow
-runner, or autonomous action facility. Persistence is confined to the approval repository and
-contains no event content. The isolated OpenAI adapter is the only outbound provider boundary. A
-focused AST-based security scan and tests guard these Phase 5 exclusions. No event is persisted,
-deduplicated, queued, or processed in the background.
+runner, or autonomous action selection. Persistence is confined to approval and execution
+repositories and contains no event content. The isolated OpenAI adapter is the only outbound
+provider boundary. A focused AST-based security scan and tests guard these Phase 6 exclusions. No
+event is persisted, deduplicated, queued, or processed in the background.
 
 ## AI input and prompt-injection controls
 
@@ -148,7 +148,9 @@ Policy logs contain only allowlisted request/event identifiers, decision, action
 version, event type, and outcome. They exclude events, payloads, customer text, AI content, headers,
 credentials, and secrets.
 
-**AI recommends. Policy decides. Human approves. Execution is a separate future boundary.**
+**AI recommends. Policy decides. Human approves. Executor performs only allowlisted internal actions.**
+
+**External business integrations are future work.**
 
 ## Approval persistence security
 
@@ -184,6 +186,30 @@ tamper evidence against accidental or unsophisticated modification; an attacker 
 database rows and recompute every hash is outside this phase's guarantees.
 
 `APP_APPROVER_ID` is a development/server-configured actor label, not authenticated identity. Phase
-5 has no login, session, identity provider, authorization system, approval UI, or execution token.
-`APPROVED` records state only that the configured development actor approved the recommendation;
-they execute nothing.
+6 has no login, session, identity provider, authorization system, or approval UI. Approval alone
+does not perform an action; the separate execution service must validate and atomically claim it.
+
+## Controlled execution security
+
+The execution request is a strict one-field model containing only `approval_id`. It structurally
+rejects client execution IDs, actions, URLs, methods, headers, bodies, credentials, commands,
+modules, callables, plugins, providers, timeouts, retry policies, and actor identities. The server
+maps the trusted approved recommendation to one closed internal action and generates a random
+non-sequential execution ID.
+
+Before claim, the repository verifies approval existence, `APPROVED` state, server TTL, audit chain,
+provenance hash, policy version, decision, action, risk, confidence, evidence, and event identity.
+Failure invokes no handler and appends `EXECUTION_REJECTED` when the existing chain is trustworthy.
+`BEGIN IMMEDIATE`, a unique execution-per-approval constraint, and a conditional `PENDING` claim
+prevent replay and concurrent double execution.
+
+The static registry has no registration API or dynamic loading. Its five handlers operate only on
+bounded Pydantic schemas and return typed local effects persisted with terminal success. Production
+action code imports no HTTP client, socket, subprocess, shell, dynamic importer, provider SDK, or
+tool framework. It cannot call GHL, n8n, messaging, CRM, email, webhooks, or arbitrary endpoints.
+
+`SUCCEEDED`, `FAILED`, and `UNKNOWN` are terminal. A definitive failure and an indeterminate outcome
+are both recorded without automatic retry; `UNKNOWN` requires a future reconciliation design.
+Execution results expose no actor configuration, effect content, payload, AI content, provider
+response, credential, SQL detail, or filesystem path. Logs allowlist execution/approval/event IDs,
+closed action/status/result codes, request ID, and safe outcome only.

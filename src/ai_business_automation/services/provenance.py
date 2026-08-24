@@ -64,22 +64,27 @@ def audit_event_hash(
     *,
     audit_event_id: AuditEventId,
     approval_id: ApprovalId,
+    execution_id: str | None = None,
+    event_id: str | None = None,
     sequence_number: int,
     event_type: AuditEventType,
-    status: ApprovalStatus,
+    status: ApprovalStatus | str,
     actor_id: ActorId,
     occurred_at: str,
     previous_event_hash: Sha256Hex,
 ) -> str:
+    status_value = status.value if isinstance(status, ApprovalStatus) else status
     current = canonical_json_bytes(
         {
             "actor_id": actor_id,
             "approval_id": approval_id,
             "audit_event_id": audit_event_id,
             "event_type": event_type.value,
+            "event_id": event_id,
+            "execution_id": execution_id,
             "occurred_at": occurred_at,
             "sequence_number": sequence_number,
-            "status": status.value,
+            "status": status_value,
         }
     )
     return sha256_hex(current + previous_event_hash.encode("ascii"))

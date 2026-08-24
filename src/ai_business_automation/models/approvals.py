@@ -57,6 +57,10 @@ class AuditEventType(StrEnum):
     EXECUTION_FAILED = "EXECUTION_FAILED"
     EXECUTION_UNKNOWN = "EXECUTION_UNKNOWN"
     EXECUTION_REJECTED = "EXECUTION_REJECTED"
+    EXECUTION_RECONCILIATION_REQUESTED = "EXECUTION_RECONCILIATION_REQUESTED"
+    EXECUTION_RECONCILED_SUCCEEDED = "EXECUTION_RECONCILED_SUCCEEDED"
+    EXECUTION_RECONCILED_FAILED = "EXECUTION_RECONCILED_FAILED"
+    EXECUTION_RECONCILIATION_REJECTED = "EXECUTION_RECONCILIATION_REJECTED"
 
 
 type ApprovalId = Annotated[
@@ -220,10 +224,14 @@ class AuditEvent(BaseModel):
     )
     event_id: EventId | None = None
     failure_category: str | None = Field(default=None, min_length=1, max_length=64)
+    commitment_hash: Sha256Hex | None = None
     sequence_number: int = Field(ge=1, le=1_000_000)
     event_type: AuditEventType
     status: str = Field(
-        pattern=r"^(?:PENDING|APPROVED|REJECTED|EXPIRED|CLAIMED|SUCCEEDED|FAILED|UNKNOWN)$"
+        pattern=(
+            r"^(?:PENDING|APPROVED|REJECTED|EXPIRED|CLAIMED|SUCCEEDED|FAILED|UNKNOWN|"
+            r"RECONCILED_SUCCEEDED|RECONCILED_FAILED)$"
+        )
     )
     actor_id: ActorId
     occurred_at: AwareDatetime

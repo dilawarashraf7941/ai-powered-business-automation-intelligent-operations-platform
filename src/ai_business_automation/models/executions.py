@@ -6,7 +6,7 @@ from typing import Annotated
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
-from ai_business_automation.models.approvals import ActorId, ApprovalId, EventId
+from ai_business_automation.models.approvals import ActorId, ApprovalId, EventId, Sha256Hex
 from ai_business_automation.models.ghl import GHLAddContactTagParameters
 from ai_business_automation.models.policy import RecommendedAction, RiskLevel
 
@@ -26,12 +26,15 @@ class ExecutionStatus(StrEnum):
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
     UNKNOWN = "UNKNOWN"
+    RECONCILED_SUCCEEDED = "RECONCILED_SUCCEEDED"
+    RECONCILED_FAILED = "RECONCILED_FAILED"
 
 
 class ExecutionResultCode(StrEnum):
     COMPLETED = "COMPLETED"
     DEFINITIVE_FAILURE = "DEFINITIVE_FAILURE"
     OUTCOME_UNKNOWN = "OUTCOME_UNKNOWN"
+    RECONCILED = "RECONCILED"
 
 
 class ExecutionFailureCategory(StrEnum):
@@ -90,6 +93,9 @@ class ExecutionRecord(BaseModel):
     safe_summary: SafeSummary | None = None
     actor_id: ActorId
     failure_category: ExecutionFailureCategory | None = None
+    reconciled_at: AwareDatetime | None = None
+    reconciler_id: ActorId | None = None
+    reconciliation_hash: Sha256Hex | None = None
 
     def public(self) -> "ExecutionResponse":
         return ExecutionResponse(
@@ -113,6 +119,8 @@ class ExecutionRecord(BaseModel):
             ExecutionStatus.SUCCEEDED,
             ExecutionStatus.FAILED,
             ExecutionStatus.UNKNOWN,
+            ExecutionStatus.RECONCILED_SUCCEEDED,
+            ExecutionStatus.RECONCILED_FAILED,
         }
         if terminal != (self.completed_at is not None):
             raise ValueError("execution completion timestamp does not match status")
@@ -122,9 +130,24 @@ class ExecutionRecord(BaseModel):
             ExecutionStatus.SUCCEEDED: ExecutionResultCode.COMPLETED,
             ExecutionStatus.FAILED: ExecutionResultCode.DEFINITIVE_FAILURE,
             ExecutionStatus.UNKNOWN: ExecutionResultCode.OUTCOME_UNKNOWN,
+            ExecutionStatus.RECONCILED_SUCCEEDED: ExecutionResultCode.RECONCILED,
+            ExecutionStatus.RECONCILED_FAILED: ExecutionResultCode.RECONCILED,
         }.get(self.status)
         if expected_code is not None and self.result_code is not expected_code:
             raise ValueError("execution result code does not match status")
+        reconciled = self.status in {
+            ExecutionStatus.RECONCILED_SUCCEEDED,
+            ExecutionStatus.RECONCILED_FAILED,
+        }
+        reconciliation_values = (self.reconciled_at, self.reconciler_id, self.reconciliation_hash)
+        if (reconciled and not all(value is not None for value in reconciliation_values)) or (
+            not reconciled and any(value is not None for value in reconciliation_values)
+        ):
+            raise ValueError("execution reconciliation metadata does not match status")
+        if self.reconciled_at is not None and self.reconciled_at.utcoffset() != UTC.utcoffset(
+            self.reconciled_at
+        ):
+            raise ValueError("reconciliation timestamp must use UTC")
         return self
 
 

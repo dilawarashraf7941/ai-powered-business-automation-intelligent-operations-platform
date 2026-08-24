@@ -47,6 +47,12 @@ class Settings(BaseSettings):
         max_length=64,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
     )
+    reconciler_id: str = Field(
+        default="development-reconciler",
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
     ghl_api_key: SecretStr | None = None
     ghl_api_version: Literal["v3"] = "v3"
     ghl_timeout_seconds: float = Field(default=10.0, ge=1.0, le=30.0)

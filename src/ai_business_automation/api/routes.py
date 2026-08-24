@@ -13,6 +13,8 @@ from ai_business_automation.models import (
     ExecutionRequest,
     ExecutionResponse,
     PolicyDecision,
+    ReconciliationRequest,
+    ReconciliationResponse,
     RejectionRequest,
 )
 from ai_business_automation.models.events import EventAcknowledgement, ExternalEvent
@@ -32,6 +34,10 @@ from ai_business_automation.services.intelligence_factory import (
 from ai_business_automation.services.policy import PolicyDecisionService
 from ai_business_automation.services.policy_factory import (
     get_policy_service as _get_policy_service,
+)
+from ai_business_automation.services.reconciliation import ReconciliationService
+from ai_business_automation.services.reconciliation_factory import (
+    get_reconciliation_service as _get_reconciliation_service,
 )
 
 router = APIRouter()
@@ -57,6 +63,10 @@ def get_approval_service() -> ApprovalService:
 
 def get_execution_service() -> ExecutionService:
     return _get_execution_service()
+
+
+def get_reconciliation_service() -> ReconciliationService:
+    return _get_reconciliation_service()
 
 
 class HealthResponse(BaseModel):
@@ -274,6 +284,36 @@ async def get_execution(
 ) -> ExecutionResponse:
     result = executions.get(execution_id).public()
     _log_execution_response(request, result, "execution_read")
+    return result
+
+
+@router.post(
+    "/api/v1/actions/executions/{execution_id}/reconcile",
+    response_model=ReconciliationResponse,
+    tags=["actions"],
+)
+async def reconcile_execution(
+    execution_id: Annotated[
+        str, Path(min_length=24, max_length=40, pattern=r"^exe_[A-Za-z0-9_-]+$")
+    ],
+    reconciliation: ReconciliationRequest,
+    request: Request,
+    service: Annotated[ReconciliationService, Depends(get_reconciliation_service)],
+) -> ReconciliationResponse:
+    """Record an authorized external verification without replaying the provider operation."""
+
+    result = service.reconcile(execution_id, reconciliation)
+    _LOGGER.info(
+        "execution_reconciliation_returned",
+        extra={
+            "request_id": str(request.state.request_id),
+            "execution_id": result.execution_id,
+            "status": result.status.value,
+            "result_code": result.result_code,
+            "reconciler_id": result.reconciler_id,
+            "outcome": "success",
+        },
+    )
     return result
 
 

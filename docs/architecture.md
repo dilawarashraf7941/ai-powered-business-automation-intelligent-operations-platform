@@ -1,9 +1,9 @@
 # Architecture
 
-Phase 7 extends the controlled execution boundary after trusted human approval with exactly one
-external business mutation while preserving all Phase 6 local actions.
+Phase 8 adds explicit operational reconciliation for ambiguous external outcomes while preserving
+the Phase 7 provider boundary and all earlier controls.
 
-## Phase 7 shape
+## Phase 8 shape
 
 The project uses a compact `src` layout with responsibilities split by boundary:
 
@@ -126,15 +126,17 @@ from a closed mapping, writes `PENDING`, and conditionally changes it to `CLAIME
 
 `ActionRegistry` is immutable application code containing five local handlers plus exactly one
 external handler:
-`NO_OP`, `CREATE_INTERNAL_TASK`, `UPDATE_INTERNAL_STATUS`, `REQUEST_HUMAN_REVIEW`, and
-`GENERATE_INTERNAL_NOTE`, and `GHL_ADD_CONTACT_TAG`. Each handler receives a server-reconstructed `ActionContext`, builds one
+`NO_OP`, `CREATE_INTERNAL_TASK`, `UPDATE_INTERNAL_STATUS`, `REQUEST_HUMAN_REVIEW`,
+`GENERATE_INTERNAL_NOTE`, and `GHL_ADD_CONTACT_TAG`. Each handler receives a server-reconstructed
+`ActionContext`, builds one
 strict bounded input model, and returns one bounded local effect. No API value can select a handler,
 callable, module, plugin, URL, provider, method, headers, body, command, timeout, or retry policy.
 
-The lifecycle is `PENDING → CLAIMED → SUCCEEDED | FAILED | UNKNOWN`. Local effects and successful
+The execution lifecycle is `PENDING → CLAIMED → SUCCEEDED | FAILED | UNKNOWN`. Local effects and successful
 completion commit together. `FAILED` is definitive non-completion; `UNKNOWN` means completion cannot
 be established. Neither state retries automatically, and every terminal state is final. The current
-handlers are deterministic and local, while `UNKNOWN` preserves safe future provider semantics.
+handlers are deterministic and local. `UNKNOWN` preserves ambiguity and permits only an explicit
+reconciliation transition, never execution replay.
 
 Execution events reuse the approval audit chain and canonical SHA-256 event hashing. The existing
 approval row count/head commitment covers `EXECUTION_CREATED`, `EXECUTION_CLAIMED`,
@@ -161,6 +163,31 @@ unsupported idempotency mechanism is invented. Audit events reuse the execution 
 only the closed failure category—not credentials, targets, tags, or provider bodies.
 
 **AI recommends. Policy decides. Human approves. Executor performs only the approved allowlisted operation.**
+
+## Reconciliation boundary
+
+The reconciliation route accepts the authoritative execution path ID plus a closed verified outcome
+and sanitized reason. A separate `ReconciliationService` and factory import no provider, HTTP,
+network, registry, or action handler. They cannot call GHL, retry, poll, or create another execution.
+
+Inside `BEGIN IMMEDIATE`, the repository verifies the approval provenance, policy version,
+action/event/parameter binding, execution/effect commitment, and full audit chain. Only `UNKNOWN`
+plus `GHL_ADD_CONTACT_TAG` is eligible. The conditional update requires status `UNKNOWN` and exactly
+one affected row, preventing concurrent double reconciliation.
+
+The deterministic reconciliation commitment includes execution/approval/event identity, action,
+original `UNKNOWN` status, operator-verified outcome, sanitized reason, policy version, original
+execution commitment, configured reconciler label, and server timestamp. It is stored in the
+execution row, incorporated into the updated execution integrity hash, and referenced by both
+reconciliation audit events. Reconciled states are terminal and cannot execute or reconcile again.
+
+Schema metadata records version 8. Startup creates a fresh schema or accepts exactly version 8;
+unversioned and incompatible Phase 6/7 schemas fail clearly without changes. No automatic migration,
+table rebuild, drop, or data deletion occurs.
+
+AI recommends. Policy decides. Human approves. Executor performs the approved operation. Ambiguous
+external outcomes become UNKNOWN. UNKNOWN requires explicit authorized reconciliation.
+Reconciliation never replays the operation.
 
 ## Future AI evolution
 

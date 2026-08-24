@@ -58,7 +58,15 @@ def error_response(request: Request, status: int, code: str, message: str) -> JS
 
 
 async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
-    if str(request.scope.get("path", "")).startswith("/api/v1/actions"):
+    path = str(request.scope.get("path", ""))
+    if path.endswith("/reconcile"):
+        return error_response(
+            request,
+            422,
+            "RECONCILIATION_VALIDATION_ERROR",
+            "Reconciliation input is invalid.",
+        )
+    if path.startswith("/api/v1/actions"):
         return error_response(
             request,
             422,

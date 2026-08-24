@@ -76,3 +76,36 @@ class ExecutionPersistenceError(ExecutionBoundaryError):
     code = "EXECUTION_UNAVAILABLE"
     safe_message = "Execution storage is temporarily unavailable."
     status_code = 503
+
+
+class ExecutionNotReconciliableError(ExecutionBoundaryError):
+    code = "EXECUTION_NOT_RECONCILIABLE"
+    safe_message = "Execution is not eligible for reconciliation."
+
+
+class ExecutionAlreadyReconciledError(ExecutionBoundaryError):
+    code = "EXECUTION_ALREADY_RECONCILED"
+    safe_message = "Execution has already been reconciled."
+
+
+class ReconciliationNotAuthorizedError(ExecutionBoundaryError):
+    code = "RECONCILIATION_NOT_AUTHORIZED"
+    safe_message = "Reconciliation is not authorized."
+    status_code = 403
+
+
+class ReconciliationValidationError(ExecutionBoundaryError):
+    code = "RECONCILIATION_VALIDATION_ERROR"
+    safe_message = "Reconciliation input is invalid."
+    status_code = 422
+
+
+class ReconciliationConflictError(ExecutionBoundaryError):
+    code = "RECONCILIATION_CONFLICT"
+    safe_message = "Reconciliation conflicted with another transition."
+
+
+class ReconciliationApprovalIntegrityError(ExecutionBoundaryError):
+    code = "APPROVAL_INTEGRITY_FAILURE"
+    safe_message = "Approval integrity verification failed."
+    status_code = 500

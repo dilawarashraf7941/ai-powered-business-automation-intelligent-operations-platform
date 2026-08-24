@@ -207,8 +207,9 @@ invoke only the dedicated GHL `add_contact_tag` provider method. Policy, approva
 models, routes, and local action handlers import no HTTP client, socket, subprocess, shell, dynamic
 importer, provider SDK, or tool framework.
 
-`SUCCEEDED`, `FAILED`, and `UNKNOWN` are terminal. A definitive failure and an indeterminate outcome
-are both recorded without automatic retry; `UNKNOWN` requires a future reconciliation design.
+`SUCCEEDED` and `FAILED` are terminal. `UNKNOWN` is never retried and may transition only through
+the provider-free authorized reconciliation boundary to `RECONCILED_SUCCEEDED` or
+`RECONCILED_FAILED`, which are terminal.
 Execution results expose no actor configuration, effect content, payload, AI content, provider
 response, credential, SQL detail, or filesystem path. Logs allowlist execution/approval/event IDs,
 closed action/status/result codes, request ID, and safe outcome only.
@@ -231,3 +232,28 @@ Failures use closed categories: `GHL_AUTHENTICATION`, `GHL_AUTHORIZATION`, `GHL_
 transmission becomes terminal `UNKNOWN`, with no retry. Manual reconciliation is required before
 any future action. There is no arbitrary URL or generic HTTP capability, no other GHL endpoint, no
 n8n integration, and no other CRM mutation.
+
+## Reconciliation security
+
+Reconciliation accepts exactly a closed outcome and a required reason of at most 500 safe
+characters. URLs, credential-like strings, shell/control content, whitespace tricks, unsupported
+outcomes, and unknown fields are rejected. The client cannot provide actor, timestamp, execution,
+approval, event, action, contact, tags, provider, status, or commitment data.
+
+The server uses only the bounded `APP_RECONCILER_ID` label. This label is not authentication and
+does not prove a human identity; access control must be supplied by the deployment until a real
+identity system is implemented. No client identity header grants reconciliation authority.
+
+Reconciliation verifies every existing trust commitment before a conditional `UNKNOWN` transition.
+The sanitized reason is persisted for operational evidence but is absent from responses and logs.
+The reconciliation hash and audit chain detect modifications to outcome, reason, actor label,
+timestamp, original commitment, and bound identities. Rejected valid-chain attempts receive a
+closed audit event; a broken chain is not extended.
+
+The reconciliation modules import no GHL provider, HTTP client, socket, OpenAI adapter, action
+registry, or workflow capability. They perform no provider lookup, inference, polling, retry, or
+replay. Exactly one execution and one approval remain in place.
+
+Database schema version 8 uses fail-closed compatibility strategy B. Fresh initialization and
+repeat initialization are safe. Unversioned or incompatible databases cause a clear startup error
+before schema writes; existing tables are never silently migrated, dropped, recreated, or deleted.

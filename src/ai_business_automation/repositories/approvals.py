@@ -37,6 +37,7 @@ from ai_business_automation.services.approval_errors import (
     ApprovalNotFoundError,
     ApprovalPersistenceError,
     ProvenanceIntegrityError,
+    SchemaCompatibilityError,
 )
 from ai_business_automation.services.provenance import (
     audit_event_hash,
@@ -45,7 +46,14 @@ from ai_business_automation.services.provenance import (
 )
 
 _SYSTEM_ACTOR = "SYSTEM"
+_SCHEMA_VERSION = 8
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS schema_metadata (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    schema_version INTEGER NOT NULL CHECK(schema_version = 8)
+);
+INSERT OR IGNORE INTO schema_metadata (singleton, schema_version) VALUES (1, 8);
+
 CREATE TABLE IF NOT EXISTS approvals (
     approval_id TEXT PRIMARY KEY CHECK(length(approval_id) BETWEEN 24 AND 40),
     event_id TEXT NOT NULL CHECK(length(event_id) BETWEEN 20 AND 40),
@@ -85,7 +93,9 @@ CREATE TABLE IF NOT EXISTS approval_audit_events (
         'APPROVAL_CREATED', 'APPROVAL_APPROVED', 'APPROVAL_REJECTED',
         'APPROVAL_EXPIRED', 'APPROVAL_TRANSITION_REJECTED',
         'EXECUTION_CREATED', 'EXECUTION_CLAIMED', 'EXECUTION_SUCCEEDED',
-        'EXECUTION_FAILED', 'EXECUTION_UNKNOWN', 'EXECUTION_REJECTED'
+        'EXECUTION_FAILED', 'EXECUTION_UNKNOWN', 'EXECUTION_REJECTED',
+        'EXECUTION_RECONCILIATION_REQUESTED', 'EXECUTION_RECONCILED_SUCCEEDED',
+        'EXECUTION_RECONCILED_FAILED', 'EXECUTION_RECONCILIATION_REJECTED'
     )),
     execution_id TEXT CHECK(
         execution_id IS NULL OR length(execution_id) BETWEEN 24 AND 40
@@ -94,9 +104,13 @@ CREATE TABLE IF NOT EXISTS approval_audit_events (
     failure_category TEXT CHECK(
         failure_category IS NULL OR length(failure_category) BETWEEN 1 AND 64
     ),
+    commitment_hash TEXT CHECK(
+        commitment_hash IS NULL OR length(commitment_hash) = 64
+    ),
     status TEXT NOT NULL CHECK(status IN (
         'PENDING', 'APPROVED', 'REJECTED', 'EXPIRED',
-        'CLAIMED', 'SUCCEEDED', 'FAILED', 'UNKNOWN'
+        'CLAIMED', 'SUCCEEDED', 'FAILED', 'UNKNOWN',
+        'RECONCILED_SUCCEEDED', 'RECONCILED_FAILED'
     )),
     actor_id TEXT NOT NULL CHECK(length(actor_id) BETWEEN 1 AND 64),
     occurred_at TEXT NOT NULL CHECK(length(occurred_at) BETWEEN 20 AND 40),
@@ -148,7 +162,10 @@ class SQLiteApprovalRepository:
     def initialize(self) -> None:
         connection = self._connect()
         try:
+            _require_compatible_or_empty_schema(connection)
             connection.executescript(_SCHEMA)
+        except SchemaCompatibilityError:
+            raise
         except sqlite3.Error as exc:
             raise ApprovalPersistenceError from exc
         finally:
@@ -412,6 +429,7 @@ class SQLiteApprovalRepository:
                 execution_id=event.execution_id,
                 event_id=event.event_id,
                 failure_category=event.failure_category,
+                commitment_hash=event.commitment_hash,
                 sequence_number=event.sequence_number,
                 event_type=event.event_type,
                 status=event.status,
@@ -478,6 +496,7 @@ class SQLiteApprovalRepository:
         execution_id: str | None = None,
         event_id: str | None = None,
         failure_category: str | None = None,
+        commitment_hash: str | None = None,
     ) -> None:
         audit_event_id = self._audit_id_factory()
         occurred_text = _datetime_text(occurred_at)
@@ -487,6 +506,7 @@ class SQLiteApprovalRepository:
             execution_id=execution_id,
             event_id=event_id,
             failure_category=failure_category,
+            commitment_hash=commitment_hash,
             sequence_number=sequence_number,
             event_type=event_type,
             status=status,
@@ -498,9 +518,10 @@ class SQLiteApprovalRepository:
             """
             INSERT INTO approval_audit_events (
                 audit_event_id, approval_id, sequence_number, event_type,
-                execution_id, event_id, failure_category, status, actor_id, occurred_at,
+                execution_id, event_id, failure_category, commitment_hash, status, actor_id,
+                occurred_at,
                 previous_event_hash, event_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 audit_event_id,
@@ -510,6 +531,7 @@ class SQLiteApprovalRepository:
                 execution_id,
                 event_id,
                 failure_category,
+                commitment_hash,
                 status.value if isinstance(status, ApprovalStatus) else status,
                 actor_id,
                 occurred_text,
@@ -530,6 +552,24 @@ class SQLiteApprovalRepository:
 
 def _new_audit_id() -> str:
     return f"aud_{secrets.token_urlsafe(18)}"
+
+
+def _require_compatible_or_empty_schema(connection: sqlite3.Connection) -> None:
+    tables = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+    }
+    if not tables:
+        return
+    if "schema_metadata" not in tables:
+        raise SchemaCompatibilityError
+    row = connection.execute(
+        "SELECT schema_version FROM schema_metadata WHERE singleton = 1"
+    ).fetchone()
+    if row is None or int(row[0]) != _SCHEMA_VERSION:
+        raise SchemaCompatibilityError
 
 
 def _datetime_text(value: datetime) -> str:
@@ -604,6 +644,9 @@ def _audit_from_row(row: sqlite3.Row) -> AuditEvent:
         event_id=str(row["event_id"]) if row["event_id"] is not None else None,
         failure_category=(
             str(row["failure_category"]) if row["failure_category"] is not None else None
+        ),
+        commitment_hash=(
+            str(row["commitment_hash"]) if row["commitment_hash"] is not None else None
         ),
         sequence_number=int(row["sequence_number"]),
         event_type=AuditEventType(row["event_type"]),

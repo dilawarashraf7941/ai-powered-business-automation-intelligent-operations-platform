@@ -67,6 +67,12 @@ from ai_business_automation.models.policy import (
     RecommendedAction,
     RiskLevel,
 )
+from ai_business_automation.models.reconciliation import (
+    MAX_RECONCILIATION_REASON_LENGTH,
+    ReconciliationOutcome,
+    ReconciliationRequest,
+    ReconciliationResponse,
+)
 from ai_business_automation.models.taxonomy import EventCategory, EventSource, EventType
 
 __all__ = [
@@ -77,6 +83,7 @@ __all__ = [
     "MAX_GHL_TAGS",
     "MAX_GHL_TAG_LENGTH",
     "MAX_POLICY_EVIDENCE",
+    "MAX_RECONCILIATION_REASON_LENGTH",
     "MAX_REJECTION_REASON_LENGTH",
     "POLICY_VERSION",
     "ActionContext",
@@ -123,6 +130,9 @@ __all__ = [
     "ProviderAnalysisOutput",
     "RecommendedAction",
     "RecommendedNextStep",
+    "ReconciliationOutcome",
+    "ReconciliationRequest",
+    "ReconciliationResponse",
     "RejectionRequest",
     "RiskLevel",
     "TrustedProvenance",

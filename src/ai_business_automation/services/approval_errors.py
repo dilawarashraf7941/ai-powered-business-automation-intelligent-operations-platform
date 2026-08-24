@@ -48,3 +48,9 @@ class ApprovalPersistenceError(ApprovalError):
     code = "APPROVAL_UNAVAILABLE"
     safe_message = "Approval storage is temporarily unavailable."
     status_code = 503
+
+
+class SchemaCompatibilityError(ApprovalError):
+    code = "SCHEMA_INCOMPATIBLE"
+    safe_message = "Database schema is incompatible with this application version."
+    status_code = 503

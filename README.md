@@ -1,6 +1,6 @@
 # AI-Powered Business Automation & Intelligent Operations Platform
 
-This repository contains the secure Phase 7 controlled execution boundary for a business
+This repository contains the secure Phase 8 controlled execution and reconciliation boundary for a business
 automation and intelligent operations platform. It normalizes bounded events, obtains strictly
 validated advisory AI analysis, evaluates deterministic policy, and records approval-required
 decisions before allowing fixed local actions or one narrowly scoped external mutation.
@@ -18,8 +18,10 @@ decisions before allowing fixed local actions or one narrowly scoped external mu
 > **AI recommends. Policy decides. Human approves. Executor performs only the approved allowlisted operation.**
 >
 > **The provider adapter performs one fixed external mutation.**
+>
+> **UNKNOWN requires explicit authorized reconciliation; reconciliation never replays the operation.**
 
-## Current Phase 7 scope
+## Current Phase 8 scope
 
 - Python 3.12 project using a `src` layout
 - Strict environment configuration through `APP_` variables
@@ -38,7 +40,10 @@ decisions before allowing fixed local actions or one narrowly scoped external mu
 - Fixed GHL origin `https://services.leadconnectorhq.com` and path `POST /contacts/{contactId}/tags`
 - Server-owned bearer authentication, API version `v3`, and bounded timeout
 - Approval provenance commits to canonical contact ID and tag parameters
-- Stable provider failure categories with a 1–60 second timeout range and no retries
+- Explicit provider-free reconciliation of `UNKNOWN` GHL executions
+- Tamper-evident reconciliation commitments and hash-chained audit events
+- Fail-closed schema version 8 compatibility checking with no destructive migration
+- Stable provider failure categories with a 1–30 second GHL timeout range and no retries
 - 16 KiB request-body ceiling enforced before framework body parsing
 - Safe JSON request-completion logs and server-generated correlation IDs
 - Sanitized, stable API errors and defensive response headers
@@ -171,11 +176,12 @@ registry binds each enum to one dedicated handler. Handler inputs and local effe
 bounded models. There is no runtime registration, dynamic import, plugin loading, generic HTTP
 client, shell, subprocess, arbitrary provider call, or client-selected callable.
 
-Execution follows `PENDING → CLAIMED → SUCCEEDED | FAILED | UNKNOWN`. Creation and claim occur in
+Execution follows `PENDING → CLAIMED → SUCCEEDED | FAILED | UNKNOWN`. An `UNKNOWN` GHL execution
+may then become `RECONCILED_SUCCEEDED` or `RECONCILED_FAILED`. Creation and claim occur in
 one `BEGIN IMMEDIATE` transaction with a unique approval reference and conditional pending-only
 update. Each approval is single-use: terminal results cannot replay, and `FAILED` or `UNKNOWN`
 results are never retried automatically. `UNKNOWN` deliberately means completion cannot be
-established and requires future reconciliation rather than replay.
+established and requires explicit operational reconciliation rather than replay.
 
 `GET /api/v1/actions/executions/{execution_id}` returns only bounded execution metadata. Execution
 records and typed local effects have SHA-256 integrity commitments. Created, claimed, succeeded,
@@ -269,16 +275,46 @@ The credential is a deployment secret supplied through `APP_GHL_API_KEY`; it is 
 
 Definitive HTTP failures become `FAILED` with one of the closed GHL failure categories. Timeout or
 an ambiguous transport interruption becomes `UNKNOWN`. Neither result is retried or replayed;
-`UNKNOWN` requires future manual reconciliation. The audit chain binds the safe failure category,
+`UNKNOWN` requires explicit manual reconciliation. The audit chain binds the safe failure category,
 while excluding request/response bodies and secrets.
+
+## Execution reconciliation
+
+`POST /api/v1/actions/executions/{execution_id}/reconcile` accepts only `outcome` (`SUCCEEDED` or
+`FAILED`) and a strictly bounded, sanitized operational reason. The path execution ID is
+authoritative. Approval, event, action, provider parameters, actor, status, timestamps, and hashes
+are reconstructed from trusted server state and cannot be supplied by the client.
+
+The provider-free reconciliation service verifies the execution commitment, approval provenance,
+policy version, action/event binding, effect commitment, and audit chain. A single `BEGIN IMMEDIATE`
+transaction appends `EXECUTION_RECONCILIATION_REQUESTED`, conditionally updates only `UNKNOWN`, and
+appends `EXECUTION_RECONCILED_SUCCEEDED` or `EXECUTION_RECONCILED_FAILED`. Concurrent or duplicate
+decisions cannot produce two transitions.
+
+The SHA-256 reconciliation commitment binds the original execution commitment, identities, action,
+original `UNKNOWN` state, verified outcome, sanitized reason, policy version, configured reconciler
+label, and server timestamp. The API never returns the reason. Reconciliation imports no provider or
+HTTP capability, performs no lookup or polling, creates no execution or approval, and never calls
+GHL.
+
+`APP_RECONCILER_ID` is a bounded server-owned operational label. It is not authentication, a user
+identity, or a role system; Phase 8 still requires deployment-level access control around the API.
+
+Schema version 8 is explicit. Fresh databases are created safely and repeated initialization is
+idempotent. A database without compatible version metadata fails startup with `SCHEMA_INCOMPATIBLE`;
+Phase 8 does not drop, rebuild, delete, or silently migrate existing Phase 6/7 data.
 
 ## Current limitations
 
-Phase 7 intentionally has no real authentication, queue, workflow engine, tool calling, AI memory,
+Phase 8 intentionally has no real authentication, queue, workflow engine, tool calling, AI memory,
 autonomous action selection, n8n integration, or other CRM mutation. SQLite persists approval,
 execution, audit, action-parameter commitments, and bounded internal-effect metadata; business
 events and AI content are not stored. Execution is single-process and there is no distributed lock,
-retry worker, reconciliation process, or external provider delivery guarantee.
+retry worker, automated reconciliation, provider polling, or external provider delivery guarantee.
+
+AI recommends. Policy decides. Human approves. Executor performs the approved operation. Ambiguous
+external outcomes become UNKNOWN. UNKNOWN requires explicit authorized reconciliation.
+Reconciliation never replays the operation.
 
 ## Roadmap
 

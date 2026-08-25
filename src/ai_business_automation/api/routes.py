@@ -294,7 +294,7 @@ def _log_approval_response(request: Request, result: ApprovalResponse, event_nam
 
 
 @router.post(
-    "/api/v1/actions/execute",
+    "/api/v1/actions/contact-tag",
     response_model=ExecutionResponse,
     tags=["actions"],
 )
@@ -306,7 +306,7 @@ async def execute_action(
 ) -> ExecutionResponse:
     """Execute only the server-derived allowlisted action bound to an approved record."""
 
-    result = executions.execute(execution_request.approval_id, actor.actor_id).public()
+    result = executions.execute(execution_request, actor.actor_id).public()
     _log_execution_response(request, result, "execution_completed")
     return result
 
@@ -351,9 +351,9 @@ async def reconcile_execution(
         extra={
             "request_id": str(request.state.request_id),
             "execution_id": result.execution_id,
-            "status": result.status.value,
-            "result_code": result.result_code,
-            "reconciler_id": result.reconciler_id,
+            "status": result.execution_status.value,
+            "declared_outcome": result.declared_outcome.value,
+            "reconciler_id": result.actor_id,
             "outcome": "success",
         },
     )
@@ -366,13 +366,8 @@ def _log_execution_response(request: Request, result: ExecutionResponse, event_n
         extra={
             "request_id": str(request.state.request_id),
             "execution_id": result.execution_id,
-            "approval_id": result.approval_id,
-            "event_id": result.event_id,
             "action": result.action.value,
             "status": result.status.value,
-            "result_code": (
-                result.result_code.value if result.result_code is not None else "PENDING"
-            ),
             "outcome": "success",
         },
     )

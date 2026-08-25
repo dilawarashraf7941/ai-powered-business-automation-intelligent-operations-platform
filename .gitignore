@@ -23,3 +23,4 @@ build/
 *.sqlite-wal
 *.sqlite3-shm
 *.sqlite3-wal
+*.sqlite3.pre-v9-*.bak

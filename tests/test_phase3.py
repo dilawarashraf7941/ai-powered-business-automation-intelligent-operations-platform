@@ -43,7 +43,7 @@ from ai_business_automation.services.intelligence import (
     BusinessIntelligenceService,
 )
 from ai_business_automation.services.normalization import EventNormalizer
-from tests.auth_helpers import authenticated_client
+from tests.auth_helpers import FAKE_ADMIN_TOKEN, auth_settings, authenticated_client
 
 
 def valid_output(**updates: object) -> dict[str, object]:
@@ -96,7 +96,7 @@ class FakeProvider:
 def analysis_client() -> Iterator[tuple[TestClient, FakeProvider]]:
     provider = FakeProvider()
     service = BusinessIntelligenceService(provider, max_input_bytes=8_192, max_output_tokens=800)
-    app = create_app(Settings(environment=Environment.TEST))
+    app = create_app(auth_settings())
     app.dependency_overrides[get_intelligence_service] = lambda: service
     with authenticated_client(app) as client:
         yield client, provider
@@ -178,7 +178,10 @@ def test_provider_receives_only_bounded_canonical_event_data(
     response = client.post(
         "/api/v1/events/analyze",
         json=analysis_event(payload={"message_text": injection}),
-        headers={"Cookie": "session=never-forward"},
+        headers={
+            "Authorization": f"Bearer {FAKE_ADMIN_TOKEN}",
+            "Cookie": "session=never-forward",
+        },
     )
     assert response.status_code == 200
     request = provider.requests[0]
@@ -189,6 +192,7 @@ def test_provider_receives_only_bounded_canonical_event_data(
     assert request.untrusted_event_data.endswith("\nEND_UNTRUSTED_EVENT_JSON")
     assert injection in request.untrusted_event_data
     assert "Authorization" not in request.untrusted_event_data
+    assert FAKE_ADMIN_TOKEN not in request.untrusted_event_data
     assert "never-forward" not in request.untrusted_event_data
     assert "Cookie" not in request.untrusted_event_data
     assert "metadata" not in request.untrusted_event_data
@@ -224,7 +228,7 @@ def test_stable_provider_failure_handling(error: Exception, code: str, status_co
 
 
 def test_unconfigured_provider_has_deterministic_no_network_fallback() -> None:
-    app = create_app(Settings(environment=Environment.TEST))
+    app = create_app(auth_settings())
     with authenticated_client(app) as client:
         response = client.post("/api/v1/events/analyze", json=analysis_event())
     assert response.status_code == 503
@@ -391,7 +395,7 @@ def test_structured_output_model_rejects_non_string_enums_and_control_text() -> 
 
 def _client_with_provider(provider: FakeProvider) -> TestClient:
     service = BusinessIntelligenceService(provider, max_input_bytes=8_192, max_output_tokens=800)
-    app = create_app(Settings(environment=Environment.TEST))
+    app = create_app(auth_settings())
     app.dependency_overrides[get_intelligence_service] = lambda: service
     return authenticated_client(app)
 

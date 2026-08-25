@@ -52,5 +52,5 @@ class ApprovalPersistenceError(ApprovalError):
 
 class SchemaCompatibilityError(ApprovalError):
     code = "SCHEMA_INCOMPATIBLE"
-    safe_message = "Database schema is incompatible with this application version."
+    safe_message = "Approval storage schema is incompatible."
     status_code = 503

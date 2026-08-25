@@ -56,7 +56,7 @@ def api_event(**updates: object) -> dict[str, object]:
 def test_all_supported_event_types_are_accepted(client: TestClient, event_type: EventType) -> None:
     updates: dict[str, object] = {"event_type": event_type.value}
     if event_type is EventType.GHL_CONTACT_TAG_REQUEST:
-        updates.update(source="INTERNAL", payload={"contact_id": "contact_123", "tags": ["vip"]})
+        updates.update(source="INTERNAL", payload={"contact_id": "contact_123", "tag": "vip"})
     response = client.post("/api/v1/events", json=api_event(**updates))
     assert response.status_code == 202
     assert response.json()["event_type"] == event_type.value

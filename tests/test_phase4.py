@@ -14,7 +14,7 @@ from httpx import Response
 from pydantic import ValidationError
 
 from ai_business_automation.api.routes import get_intelligence_service, get_policy_service
-from ai_business_automation.config import Environment, Settings
+from ai_business_automation.config import Settings
 from ai_business_automation.logging import JsonFormatter
 from ai_business_automation.main import create_app
 from ai_business_automation.models import (
@@ -45,7 +45,7 @@ from ai_business_automation.services.policy import (
     PolicyDecisionService,
     PolicyEvaluation,
 )
-from tests.auth_helpers import authenticated_client
+from tests.auth_helpers import FAKE_ADMIN_TOKEN, auth_settings, authenticated_client
 
 FIXED_NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
 EVENT_ID = "evt_fixed_server_identity"
@@ -129,7 +129,7 @@ def decision_client() -> Iterator[tuple[TestClient, PolicyFakeProvider, datetime
     policy_service = PolicyDecisionService(
         engine=DeterministicPolicyEngine(0.85), clock=lambda: generated_at
     )
-    app = create_app(Settings(environment=Environment.TEST))
+    app = create_app(auth_settings())
     app.dependency_overrides[get_intelligence_service] = lambda: intelligence_service
     app.dependency_overrides[get_policy_service] = lambda: policy_service
     with authenticated_client(app) as client:
@@ -388,14 +388,14 @@ def test_decide_endpoint_does_not_execute_or_log_sensitive_content(
         response = client.post(
             "/api/v1/events/decide",
             json=api_event(payload={"message_text": marker}),
-            headers={"Authorization": "Bearer fake-test-admin-token"},
+            headers={"Authorization": f"Bearer {FAKE_ADMIN_TOKEN}"},
         )
     finally:
         logger.removeHandler(handler)
     assert response.status_code == 200
     logs = stream.getvalue()
     assert marker not in logs
-    assert "fake-test-admin-token" not in logs
+    assert FAKE_ADMIN_TOKEN not in logs
     assert '"decision":"ALLOW"' in logs
     assert '"policy_version":"1.0"' in logs
 
@@ -459,7 +459,7 @@ def _external_event_model() -> ExternalEvent:
 
 
 def _decision_response(provider: PolicyFakeProvider) -> Response:
-    app = create_app(Settings(environment=Environment.TEST))
+    app = create_app(auth_settings())
     app.dependency_overrides[get_intelligence_service] = lambda: BusinessIntelligenceService(
         provider=provider, max_input_bytes=8_192, max_output_tokens=800
     )

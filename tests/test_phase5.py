@@ -17,7 +17,7 @@ from pydantic import ValidationError
 
 import ai_business_automation.repositories.approvals as repository_module
 from ai_business_automation.api.routes import get_approval_service, get_intelligence_service
-from ai_business_automation.config import Environment, Settings
+from ai_business_automation.config import Settings
 from ai_business_automation.main import create_app
 from ai_business_automation.models import (
     ApprovalRecord,
@@ -55,7 +55,7 @@ from ai_business_automation.services.provenance import (
     build_trusted_provenance,
     provenance_hash,
 )
-from tests.auth_helpers import authenticated_client
+from tests.auth_helpers import auth_settings, authenticated_client
 
 FIXED_NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
 EVENT_ID = "evt_fixed_server_identity"
@@ -194,7 +194,7 @@ def approval_client(
     )
     provider = ApprovalFakeProvider()
     intelligence_service = BusinessIntelligenceService(provider, 8_192, 800)
-    app = create_app(Settings(environment=Environment.TEST))
+    app = create_app(auth_settings(approval_database_path=str(database)))
     app.dependency_overrides[get_approval_service] = lambda: approval_service
     app.dependency_overrides[get_intelligence_service] = lambda: intelligence_service
     with authenticated_client(app) as client:
@@ -733,7 +733,7 @@ def test_ai_failure_creates_no_approval_and_preserves_request_id(
     intelligence_service = BusinessIntelligenceService(
         ApprovalFakeProvider(error=AITimeoutError()), 8_192, 800
     )
-    app = create_app(Settings(environment=Environment.TEST))
+    app = create_app(auth_settings(approval_database_path=str(database)))
     app.dependency_overrides[get_approval_service] = lambda: approval_service
     app.dependency_overrides[get_intelligence_service] = lambda: intelligence_service
     with authenticated_client(app) as client:

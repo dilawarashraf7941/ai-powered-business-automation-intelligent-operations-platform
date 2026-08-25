@@ -102,6 +102,12 @@ class ProcessRateLimiter:
             if count > self._limits[bucket]:
                 raise RateLimitError
 
+    @property
+    def bucket_count(self) -> int:
+        """Expose only the fixed bucket count, never identities or request data."""
+
+        return len(self._state)
+
 
 _ROLE_PERMISSIONS = {
     AuthRole.READ_ONLY: frozenset({"read", "analysis"}),

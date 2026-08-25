@@ -114,13 +114,18 @@ def test_decision_endpoint_accepts_only_the_strict_external_event() -> None:
     assert "event: PolicyDecision" not in routes
 
 
-def test_execution_endpoint_accepts_only_a_strict_approval_reference() -> None:
+def test_execution_endpoint_accepts_only_the_strict_contact_tag_request() -> None:
     routes = (SOURCE / "ai_business_automation" / "api" / "routes.py").read_text(encoding="utf-8")
     models = (SOURCE / "ai_business_automation" / "models" / "executions.py").read_text(
         encoding="utf-8"
     )
     assert "execution_request: ExecutionRequest" in routes
     assert "approval_id: ApprovalId" in models
+    request_model = models.split("class ExecutionRequest", 1)[1].split("class ExecutionRecord", 1)[
+        0
+    ]
+    assert "contact_id" not in request_model
+    assert "tag" not in request_model
     for prohibited in ("url:", "method:", "headers:", "command:", "callable:", "module:"):
         assert prohibited not in models
 
@@ -168,6 +173,7 @@ def test_sqlite_and_sql_are_confined_to_repository_adapter() -> None:
     assert sqlite_importers == {
         "src/ai_business_automation/repositories/approvals.py",
         "src/ai_business_automation/repositories/executions.py",
+        "src/ai_business_automation/repositories/migrations.py",
         "src/ai_business_automation/repositories/security_audit.py",
     }
     routes = (SOURCE / "ai_business_automation" / "api" / "routes.py").read_text(encoding="utf-8")

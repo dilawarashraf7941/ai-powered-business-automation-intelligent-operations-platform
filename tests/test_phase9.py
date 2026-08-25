@@ -191,10 +191,10 @@ def test_duplicate_headers_fail_at_the_http_boundary() -> None:
         (AuthRole.EXECUTOR, "/api/v1/approvals", 403),
         (AuthRole.APPROVER, "/api/v1/approvals", 422),
         (AuthRole.ADMIN, "/api/v1/approvals", 422),
-        (AuthRole.READ_ONLY, "/api/v1/actions/execute", 403),
-        (AuthRole.APPROVER, "/api/v1/actions/execute", 403),
-        (AuthRole.EXECUTOR, "/api/v1/actions/execute", 422),
-        (AuthRole.ADMIN, "/api/v1/actions/execute", 422),
+        (AuthRole.READ_ONLY, "/api/v1/actions/contact-tag", 403),
+        (AuthRole.APPROVER, "/api/v1/actions/contact-tag", 403),
+        (AuthRole.EXECUTOR, "/api/v1/actions/contact-tag", 422),
+        (AuthRole.ADMIN, "/api/v1/actions/contact-tag", 422),
     ],
 )
 def test_mutation_authorization_matrix(role: AuthRole, path: str, expected: int) -> None:
@@ -285,7 +285,7 @@ def test_alternative_authentication_channels_do_not_bypass(
 def test_body_actor_and_role_injection_are_rejected() -> None:
     with _client(AuthRole.EXECUTOR) as client:
         response = client.post(
-            "/api/v1/actions/execute",
+            "/api/v1/actions/contact-tag",
             json={
                 "approval_id": "apr_abcdefghijklmnopqrstuvwx",
                 "actor_id": "attacker",

@@ -1,498 +1,397 @@
-"""Phase 7 controlled HighLevel integration and trust-boundary tests."""
+"""Phase 7 server-configured bearer authentication and closed-role authorization tests."""
 
+import hmac
 import json
 import logging
 import secrets
 import shutil
 import sqlite3
 from collections.abc import Iterator
-from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
-import httpx
 import pytest
+from fastapi.testclient import TestClient
 from pydantic import SecretStr, ValidationError
 
+from ai_business_automation.api.routes import get_approval_service, get_execution_service
 from ai_business_automation.config import Environment, Settings
-from ai_business_automation.models import (
-    BusinessIntelligenceResult,
-    CanonicalBusinessEvent,
-    EventCategory,
-    EventSource,
-    EventType,
-    ExecutionFailureCategory,
-    ExecutionStatus,
-    ExternalEvent,
-    GHLAddContactTagParameters,
-    GHLAddTagsRequest,
-    Intent,
-    Priority,
-    RecommendedAction,
-    RecommendedNextStep,
-    Urgency,
+from ai_business_automation.logging import JsonFormatter, redact
+from ai_business_automation.main import create_app
+from ai_business_automation.models import AuthRole, ExecutionAction, ExecutionStatus
+from ai_business_automation.repositories.security_audit import SecurityAuditRepository
+from ai_business_automation.security.auth import (
+    AuthenticationError,
+    BearerAuthenticator,
+    ProcessRateLimiter,
 )
-from ai_business_automation.providers import (
-    GHLClient,
-    GHLFailureCategory,
-    GHLOutcomeCertainty,
-    GHLProviderError,
-    UnavailableGHLProvider,
+from tests.test_phase6 import (
+    CONTACT_ID,
+    TAG,
+    RecordingProvider,
+    action_request,
+    boundary,
+    intelligence,
+    tag_event,
 )
-from ai_business_automation.providers.ghl_factory import create_ghl_provider
-from ai_business_automation.repositories import SQLiteExecutionRepository
-from ai_business_automation.services.actions import ActionRegistry
-from ai_business_automation.services.approval_errors import ProvenanceIntegrityError
-from ai_business_automation.services.approvals import ApprovalService
-from ai_business_automation.services.execution_errors import (
-    ApprovalNotApprovedError,
-    ExecutionAlreadyCompletedError,
-    ExecutionApprovalExpiredError,
-    ExecutionIntegrityError,
-)
-from ai_business_automation.services.executions import ExecutionService
-from ai_business_automation.services.normalization import EventNormalizer
-from ai_business_automation.services.policy import DeterministicPolicyEngine, PolicyDecisionService
 
-NOW = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
-EVENT_ID = "evt_phase7_ghl_identity"
-CONTACT_ID = "contact_123456"
-SECRET_MARKER = "phase7-placeholder-credential"
+_TOKENS = {
+    AuthRole.READ_ONLY: "fake-read-only-test-token",
+    AuthRole.APPROVER: "fake-approver-test-token",
+    AuthRole.EXECUTOR: "fake-executor-test-token",
+    AuthRole.ADMIN: "fake-admin-role-test-token",
+}
 
 
-@dataclass
-class Clock:
-    value: datetime = NOW
-
-    def __call__(self) -> datetime:
-        return self.value
-
-
-class RecordingProvider:
-    def __init__(self, error: GHLProviderError | None = None) -> None:
-        self.calls: list[GHLAddContactTagParameters] = []
-        self.error = error
-
-    def add_contact_tag(self, parameters: GHLAddContactTagParameters) -> None:
-        self.calls.append(parameters)
-        if self.error is not None:
-            raise self.error
+def _settings(role: AuthRole, **updates: Any) -> Settings:
+    values: dict[str, Any] = {
+        "environment": Environment.TEST,
+        "approval_database_path": "phase7.sqlite3",
+        "auth_token_1": SecretStr(_TOKENS[role]),
+        "auth_actor_1": f"{role.value.lower()}-actor",
+        "auth_role_1": role,
+    }
+    values.update(updates)
+    return Settings(**values)
 
 
-@pytest.fixture
-def phase7_tmp_path() -> Iterator[Path]:
+def _client(role: AuthRole, **settings_updates: Any) -> TestClient:
+    return TestClient(
+        create_app(_settings(role, **settings_updates)),
+        headers={"Authorization": f"Bearer {_TOKENS[role]}"},
+    )
+
+
+@pytest.fixture(autouse=True)
+def isolated_database(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     root = Path(".test-data")
     root.mkdir(exist_ok=True)
-    path = root / f"phase7-{secrets.token_hex(12)}"
+    path = (root / f"phase7-{secrets.token_hex(12)}").resolve()
     path.mkdir()
+    monkeypatch.chdir(path)
     try:
-        yield path
+        yield
     finally:
+        monkeypatch.chdir(Path(__file__).resolve().parents[1])
         shutil.rmtree(path, ignore_errors=True)
 
 
-def ghl_event() -> CanonicalBusinessEvent:
-    return EventNormalizer(clock=lambda: NOW, event_id_factory=lambda: EVENT_ID).normalize(
-        ExternalEvent(
-            event_type=EventType.GHL_CONTACT_TAG_REQUEST,
-            source=EventSource.INTERNAL,
-            occurred_at=NOW - timedelta(minutes=1),
-            payload={"contact_id": CONTACT_ID, "tags": ["vip", "qualified-lead"]},
-        )
-    )
+def test_health_is_public() -> None:
+    with TestClient(create_app(Settings(environment=Environment.TEST))) as client:
+        response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
 
 
-def ghl_intelligence() -> BusinessIntelligenceResult:
-    return BusinessIntelligenceResult(
-        event_id=EVENT_ID,
-        category=EventCategory.INTERNAL,
-        priority=Priority.LOW,
-        urgency=Urgency.LOW,
-        intent=Intent.INTERNAL,
-        confidence=0.93,
-        summary="A requested external tag mutation requires approval.",
-        reasons=["The event explicitly requests the one allowlisted operation."],
-        recommended_next_step=RecommendedNextStep.REVIEW,
-    )
-
-
-def boundary(
-    database: Path,
-    provider: RecordingProvider,
-    clock: Clock | None = None,
-) -> tuple[ApprovalService, ExecutionService, SQLiteExecutionRepository, Clock]:
-    active_clock = clock or Clock()
-    repository = SQLiteExecutionRepository(database)
-    repository.initialize()
-    approvals = ApprovalService(
-        repository=repository,
-        policy_service=PolicyDecisionService(DeterministicPolicyEngine(), clock=active_clock),
-        ttl_seconds=1_800,
-        approver_id="phase7-approver",
-        clock=active_clock,
-    )
-    executions = ExecutionService(
-        repository=repository,
-        registry=ActionRegistry(provider),
-        actor_id="phase7-approver",
-        clock=active_clock,
-    )
-    return approvals, executions, repository, active_clock
-
-
-def test_strict_action_parameters_are_canonical_and_bounded() -> None:
-    parameters = GHLAddContactTagParameters(
-        contact_id=CONTACT_ID,
-        tags=("vip", "Qualified Lead"),
-    )
-    assert parameters.tags == ("Qualified Lead", "vip")
-    assert GHLAddTagsRequest(tags=parameters.tags).model_dump(mode="json") == {
-        "tags": ["Qualified Lead", "vip"]
-    }
-    with pytest.raises(ValidationError):
-        GHLAddContactTagParameters(contact_id=CONTACT_ID, tags=("vip", "VIP"))
-    with pytest.raises(ValidationError):
-        GHLAddContactTagParameters.model_validate({"contact_id": CONTACT_ID, "tags": "vip"})
-    with pytest.raises(ValidationError):
-        GHLAddContactTagParameters.model_validate({"contact_id": CONTACT_ID, "tags": [1]})
-    with pytest.raises(ValidationError):
-        GHLAddContactTagParameters(contact_id=CONTACT_ID, tags=("Bearer credentialmarker",))
+@pytest.mark.parametrize("role", list(AuthRole))
+def test_each_closed_role_authenticates(role: AuthRole) -> None:
+    actor = BearerAuthenticator(_settings(role)).authenticate([f"Bearer {_TOKENS[role]}"])
+    assert actor.actor_id == f"{role.value.lower()}-actor"
+    assert actor.role is role
 
 
 @pytest.mark.parametrize(
-    "contact_id",
-    ["short", "contact/id123", "https://evil.example", "contact id123", "x" * 41],
-)
-def test_malformed_contact_ids_are_rejected(contact_id: str) -> None:
-    with pytest.raises(ValidationError):
-        GHLAddContactTagParameters(contact_id=contact_id, tags=("vip",))
-
-
-@pytest.mark.parametrize(
-    "tags",
-    [(), tuple(f"tag-{index}" for index in range(11)), ("x" * 51,), ("https://evil",), (" bad",)],
-)
-def test_invalid_tags_are_rejected(tags: tuple[str, ...]) -> None:
-    with pytest.raises(ValidationError):
-        GHLAddContactTagParameters(contact_id=CONTACT_ID, tags=tags)
-
-
-def test_arbitrary_action_body_fields_and_external_sources_are_rejected() -> None:
-    with pytest.raises(ValidationError):
-        GHLAddContactTagParameters.model_validate(
-            {"contact_id": CONTACT_ID, "tags": ["vip"], "url": "https://evil.example"}
-        )
-    with pytest.raises(ValidationError):
-        ExternalEvent(
-            event_type=EventType.GHL_CONTACT_TAG_REQUEST,
-            source=EventSource.API,
-            occurred_at=NOW,
-            payload={"contact_id": CONTACT_ID, "tags": ["vip"]},
-        )
-
-
-def test_policy_and_approval_bind_exact_parameters(phase7_tmp_path: Path) -> None:
-    approvals, _executions, repository, _clock = boundary(
-        phase7_tmp_path / "binding.sqlite3", RecordingProvider()
-    )
-    event = ghl_event()
-    decision = approvals.policy_service.decide(event, ghl_intelligence())
-    assert decision.action is RecommendedAction.GHL_ADD_CONTACT_TAG
-    created = approvals.create(event, ghl_intelligence())
-    assert created.action_parameters == GHLAddContactTagParameters(
-        contact_id=CONTACT_ID, tags=("qualified-lead", "vip")
-    )
-    assert repository.verify_audit_chain(created.approval_id)
-
-
-def test_parameter_or_event_tampering_invalidates_provenance(phase7_tmp_path: Path) -> None:
-    database = phase7_tmp_path / "tamper.sqlite3"
-    approvals, _executions, repository, _clock = boundary(database, RecordingProvider())
-    created = approvals.create(ghl_event(), ghl_intelligence())
-    connection = sqlite3.connect(database)
-    try:
-        connection.execute(
-            "UPDATE approvals SET action_parameters_json = ? WHERE approval_id = ?",
-            (json.dumps({"contact_id": "contact_999999", "tags": ["vip"]}), created.approval_id),
-        )
-        connection.commit()
-    finally:
-        connection.close()
-    with pytest.raises(ProvenanceIntegrityError):
-        repository.get(created.approval_id, NOW)
-
-
-def test_success_executes_exactly_once_and_persists_no_secret(phase7_tmp_path: Path) -> None:
-    database = phase7_tmp_path / "success.sqlite3"
-    provider = RecordingProvider()
-    approvals, executions, repository, _clock = boundary(database, provider)
-    created = approvals.create(ghl_event(), ghl_intelligence())
-    approvals.approve(created.approval_id)
-    result = executions.execute(created.approval_id)
-    assert result.status is ExecutionStatus.SUCCEEDED
-    assert result.failure_category is None
-    assert provider.calls == [created.action_parameters]
-    assert repository.verify_integrity(result.execution_id)
-    with pytest.raises(ExecutionAlreadyCompletedError):
-        executions.execute(created.approval_id)
-    assert len(provider.calls) == 1
-    assert SECRET_MARKER.encode() not in database.read_bytes()
-    connection = sqlite3.connect(database)
-    try:
-        assert connection.execute("SELECT count(*) FROM internal_action_effects").fetchone() == (0,)
-    finally:
-        connection.close()
-
-
-@pytest.mark.parametrize(
-    ("category", "certainty", "status"),
+    ("headers", "code"),
     [
-        (GHLFailureCategory.AUTHENTICATION, GHLOutcomeCertainty.DEFINITIVE, ExecutionStatus.FAILED),
-        (GHLFailureCategory.TIMEOUT, GHLOutcomeCertainty.UNKNOWN, ExecutionStatus.UNKNOWN),
-        (GHLFailureCategory.NETWORK, GHLOutcomeCertainty.UNKNOWN, ExecutionStatus.UNKNOWN),
+        ([], "AUTHENTICATION_REQUIRED"),
+        (["Basic fake-value"], "AUTHENTICATION_FAILED"),
+        (["Bearer "], "AUTHENTICATION_FAILED"),
+        (["Bearer fake-invalid-test-token"], "AUTHENTICATION_FAILED"),
+        ([f"Bearer {'x' * 257}"], "AUTHENTICATION_FAILED"),
+        (["Bearer one two"], "AUTHENTICATION_FAILED"),
     ],
 )
-def test_failure_certainty_drives_terminal_state_without_retry(
-    phase7_tmp_path: Path,
-    category: GHLFailureCategory,
-    certainty: GHLOutcomeCertainty,
-    status: ExecutionStatus,
-) -> None:
-    provider = RecordingProvider(GHLProviderError(category, certainty))
-    approvals, executions, repository, _clock = boundary(
-        phase7_tmp_path / f"{category.value}.sqlite3", provider
-    )
-    created = approvals.create(ghl_event(), ghl_intelligence())
-    approvals.approve(created.approval_id)
-    result = executions.execute(created.approval_id)
-    assert result.status is status
-    assert result.failure_category is ExecutionFailureCategory(category.value)
-    assert len(provider.calls) == 1
-    with pytest.raises(ExecutionAlreadyCompletedError):
-        executions.execute(created.approval_id)
-    assert len(provider.calls) == 1
-    assert repository.verify_audit_chain(created.approval_id)
+def test_strict_bearer_parsing(headers: list[str], code: str) -> None:
+    with pytest.raises(AuthenticationError) as raised:
+        BearerAuthenticator(_settings(AuthRole.ADMIN)).authenticate(headers)
+    assert raised.value.code == code
+    assert _TOKENS[AuthRole.ADMIN] not in str(raised.value)
 
 
-def test_pending_rejected_and_expired_approvals_never_call_provider(
-    phase7_tmp_path: Path,
-) -> None:
-    for state in ("pending", "rejected", "expired"):
-        provider = RecordingProvider()
-        clock = Clock()
-        approvals, executions, _repository, _clock = boundary(
-            phase7_tmp_path / f"{state}.sqlite3", provider, clock
+def test_duplicate_authorization_headers_are_rejected() -> None:
+    authenticator = BearerAuthenticator(_settings(AuthRole.ADMIN))
+    with pytest.raises(AuthenticationError):
+        authenticator.authenticate(
+            [f"Bearer {_TOKENS[AuthRole.ADMIN]}", f"Bearer {_TOKENS[AuthRole.ADMIN]}"]
         )
-        created = approvals.create(ghl_event(), ghl_intelligence())
-        if state == "rejected":
-            approvals.reject(created.approval_id, "Not authorized")
-        if state == "expired":
-            approvals.approve(created.approval_id)
-            clock.value += timedelta(seconds=1_801)
-        error = ExecutionApprovalExpiredError if state == "expired" else ApprovalNotApprovedError
-        with pytest.raises(error):
-            executions.execute(created.approval_id)
-        assert provider.calls == []
 
 
-def test_approved_internal_action_cannot_invoke_ghl(phase7_tmp_path: Path) -> None:
-    provider = RecordingProvider()
-    approvals, executions, _repository, _clock = boundary(
-        phase7_tmp_path / "internal.sqlite3", provider
-    )
-    event = EventNormalizer(clock=lambda: NOW, event_id_factory=lambda: EVENT_ID).normalize(
-        ExternalEvent(
-            event_type=EventType.CUSTOMER_REQUEST,
-            source=EventSource.API,
-            occurred_at=NOW - timedelta(minutes=1),
-            payload={"request_type": "review"},
-        )
-    )
-    intelligence = ghl_intelligence().model_copy(
-        update={
-            "category": EventCategory.CUSTOMER,
-            "intent": Intent.SUPPORT,
-            "recommended_next_step": RecommendedNextStep.CONTACT_HUMAN,
-        }
-    )
-    created = approvals.create(event, intelligence)
-    approvals.approve(created.approval_id)
-    assert executions.execute(created.approval_id).status is ExecutionStatus.SUCCEEDED
-    assert provider.calls == []
-
-
-def client_with(handler: httpx.MockTransport) -> GHLClient:
-    return GHLClient(SecretStr(SECRET_MARKER), "v3", 5.0, transport=handler)
-
-
-def test_http_contract_is_fixed_and_response_is_bounded() -> None:
-    observed: list[httpx.Request] = []
-
-    def respond(request: httpx.Request) -> httpx.Response:
-        observed.append(request)
-        return httpx.Response(201, json={"tags": ["vip", "existing"]})
-
-    client_with(httpx.MockTransport(respond)).add_contact_tag(
-        GHLAddContactTagParameters(contact_id=CONTACT_ID, tags=("vip",))
-    )
-    request = observed[0]
-    assert request.method == "POST"
-    assert str(request.url) == ("https://services.leadconnectorhq.com/contacts/contact_123456/tags")
-    assert request.headers["Version"] == "v3"
-    assert request.headers["Authorization"] == f"Bearer {SECRET_MARKER}"
-    assert json.loads(request.content) == {"tags": ["vip"]}
-    assert "Idempotency" not in request.headers
-
-
-@pytest.mark.parametrize(
-    ("status", "category"),
-    [
-        (400, GHLFailureCategory.VALIDATION),
-        (401, GHLFailureCategory.AUTHENTICATION),
-        (403, GHLFailureCategory.AUTHORIZATION),
-        (404, GHLFailureCategory.NOT_FOUND),
-        (422, GHLFailureCategory.VALIDATION),
-        (429, GHLFailureCategory.RATE_LIMIT),
-        (500, GHLFailureCategory.SERVER_ERROR),
-    ],
-)
-def test_http_failures_are_safely_classified(status: int, category: GHLFailureCategory) -> None:
-    transport = httpx.MockTransport(lambda request: httpx.Response(status, text=SECRET_MARKER))
-    with pytest.raises(GHLProviderError) as captured:
-        client_with(transport).add_contact_tag(
-            GHLAddContactTagParameters(contact_id=CONTACT_ID, tags=("vip",))
-        )
-    assert captured.value.category is category
-    assert captured.value.certainty is GHLOutcomeCertainty.DEFINITIVE
-    assert SECRET_MARKER not in str(captured.value)
-
-
-@pytest.mark.parametrize("response", [httpx.Response(200), httpx.Response(201, text="bad-json")])
-def test_unexpected_or_malformed_success_is_unknown(response: httpx.Response) -> None:
-    transport = httpx.MockTransport(lambda request: response)
-    with pytest.raises(GHLProviderError) as captured:
-        client_with(transport).add_contact_tag(
-            GHLAddContactTagParameters(contact_id=CONTACT_ID, tags=("vip",))
-        )
-    assert captured.value.category is GHLFailureCategory.UNKNOWN
-    assert captured.value.certainty is GHLOutcomeCertainty.UNKNOWN
-
-
-def test_oversized_or_incomplete_success_is_unknown() -> None:
-    responses = [
-        httpx.Response(201, content=b"x" * 4_097),
-        httpx.Response(201, json={"tags": ["different"]}),
-    ]
-    for response in responses:
-        with pytest.raises(GHLProviderError) as captured:
-            client_with(httpx.MockTransport(lambda request, item=response: item)).add_contact_tag(
-                GHLAddContactTagParameters(contact_id=CONTACT_ID, tags=("vip",))
-            )
-        assert captured.value.certainty is GHLOutcomeCertainty.UNKNOWN
-
-
-@pytest.mark.parametrize(
-    ("exception", "category", "certainty"),
-    [
-        (httpx.ReadTimeout("timeout"), GHLFailureCategory.TIMEOUT, GHLOutcomeCertainty.UNKNOWN),
-        (
-            httpx.ConnectError("connect"),
-            GHLFailureCategory.NETWORK,
-            GHLOutcomeCertainty.DEFINITIVE,
-        ),
-        (
-            httpx.ReadError("interrupted"),
-            GHLFailureCategory.NETWORK,
-            GHLOutcomeCertainty.UNKNOWN,
-        ),
-    ],
-)
-def test_transport_failures_are_classified(
-    exception: httpx.RequestError,
-    category: GHLFailureCategory,
-    certainty: GHLOutcomeCertainty,
-) -> None:
-    def raise_transport(request: httpx.Request) -> httpx.Response:
-        exception.request = request
-        raise exception
-
-    with pytest.raises(GHLProviderError) as captured:
-        client_with(httpx.MockTransport(raise_transport)).add_contact_tag(
-            GHLAddContactTagParameters(contact_id=CONTACT_ID, tags=("vip",))
-        )
-    assert captured.value.category is category
-    assert captured.value.certainty is certainty
-
-
-def test_configuration_is_server_owned_secret_and_bounded() -> None:
+def test_all_slots_use_constant_time_comparison(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = Settings(
         environment=Environment.TEST,
-        ghl_api_key=SECRET_MARKER,
-        ghl_api_version="v3",
-        ghl_timeout_seconds=5,
+        auth_token_1=SecretStr("fake-slot-one-token"),
+        auth_actor_1="one",
+        auth_role_1=AuthRole.READ_ONLY,
+        auth_token_2=SecretStr("fake-slot-two-token"),
+        auth_actor_2="two",
+        auth_role_2=AuthRole.APPROVER,
+        auth_token_3=SecretStr("fake-slot-three-token"),
+        auth_actor_3="three",
+        auth_role_3=AuthRole.ADMIN,
     )
-    assert isinstance(settings.ghl_api_key, SecretStr)
-    assert SECRET_MARKER not in repr(settings)
-    assert isinstance(create_ghl_provider(settings), GHLClient)
-    assert create_ghl_provider(Settings(environment=Environment.TEST)).__class__.__name__ == (
-        "UnavailableGHLProvider"
-    )
-    with pytest.raises(ValidationError):
-        Settings(environment=Environment.TEST, ghl_api_version="v4")
-    with pytest.raises(ValidationError):
-        Settings(environment=Environment.TEST, ghl_timeout_seconds=31)
-    with pytest.raises(ValueError):
-        GHLClient(SecretStr(SECRET_MARKER), "v3", 0.5)
-    with pytest.raises(ValueError):
-        GHLClient(SecretStr(SECRET_MARKER), "v4", 5.0)  # type: ignore[arg-type]
-    with pytest.raises(GHLProviderError):
-        UnavailableGHLProvider().add_contact_tag(
-            GHLAddContactTagParameters(contact_id=CONTACT_ID, tags=("vip",))
+    authenticator = BearerAuthenticator(settings)
+    calls: list[tuple[str, str]] = []
+    original = hmac.compare_digest
+
+    def observed(left: str, right: str) -> bool:
+        calls.append((left, right))
+        return original(left, right)
+
+    monkeypatch.setattr(hmac, "compare_digest", observed)
+    actor = authenticator.authenticate(["Bearer fake-slot-one-token"])
+    assert actor.actor_id == "one"
+    assert len(calls) == 3
+    assert {right for _, right in calls} == {
+        "fake-slot-one-token",
+        "fake-slot-two-token",
+        "fake-slot-three-token",
+    }
+
+
+def test_missing_authentication_is_safe_401() -> None:
+    app = create_app(_settings(AuthRole.READ_ONLY))
+    with TestClient(app) as client:
+        response = client.get("/api/v1/admin/status")
+    assert response.status_code == 401
+    assert response.headers["WWW-Authenticate"] == "Bearer"
+    assert response.json()["error"]["code"] == "AUTHENTICATION_REQUIRED"
+    assert _TOKENS[AuthRole.READ_ONLY] not in response.text
+
+
+def test_duplicate_headers_fail_at_http_boundary() -> None:
+    token = _TOKENS[AuthRole.ADMIN]
+    with TestClient(create_app(_settings(AuthRole.ADMIN))) as client:
+        response = client.get(
+            "/api/v1/admin/status",
+            headers=[("Authorization", f"Bearer {token}"), ("Authorization", f"Bearer {token}")],
         )
+    assert response.status_code == 401
 
 
-def test_provider_failures_and_secrets_do_not_leak_to_logs(
-    phase7_tmp_path: Path, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize("role", [AuthRole.READ_ONLY, AuthRole.APPROVER, AuthRole.EXECUTOR])
+def test_only_admin_can_access_admin_status(role: AuthRole) -> None:
+    with _client(role) as client:
+        response = client.get("/api/v1/admin/status")
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "AUTHORIZATION_DENIED"
+
+
+def test_admin_status_is_bounded_and_not_cached() -> None:
+    with _client(AuthRole.ADMIN) as client:
+        response = client.get("/api/v1/admin/status")
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "authentication": "enabled",
+        "authorization": "enabled",
+    }
+    assert response.headers["Cache-Control"] == "no-store"
+    assert response.headers["Pragma"] == "no-cache"
+
+
+@pytest.mark.parametrize(
+    ("role", "path", "expected"),
+    [
+        (AuthRole.READ_ONLY, "/api/v1/approvals", 403),
+        (AuthRole.EXECUTOR, "/api/v1/approvals", 403),
+        (AuthRole.APPROVER, "/api/v1/approvals", 422),
+        (AuthRole.ADMIN, "/api/v1/approvals", 422),
+        (AuthRole.READ_ONLY, "/api/v1/actions/contact-tag", 403),
+        (AuthRole.APPROVER, "/api/v1/actions/contact-tag", 403),
+        (AuthRole.EXECUTOR, "/api/v1/actions/contact-tag", 422),
+        (AuthRole.ADMIN, "/api/v1/actions/contact-tag", 422),
+    ],
+)
+def test_mutation_authorization_matrix(role: AuthRole, path: str, expected: int) -> None:
+    with _client(role) as client:
+        response = client.post(path, json={})
+    assert response.status_code == expected
+
+
+@pytest.mark.parametrize("role", list(AuthRole))
+@pytest.mark.parametrize(
+    "path",
+    ["/api/v1/approvals/apr_short", "/api/v1/actions/executions/exe_short"],
+)
+def test_every_role_inherits_protected_reads(role: AuthRole, path: str) -> None:
+    with _client(role) as client:
+        response = client.get(path)
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    ("role", "expected"),
+    [
+        (AuthRole.READ_ONLY, 403),
+        (AuthRole.EXECUTOR, 403),
+        (AuthRole.APPROVER, 422),
+        (AuthRole.ADMIN, 422),
+    ],
+)
+@pytest.mark.parametrize("transition", ["approve", "reject"])
+def test_approval_transition_matrix(role: AuthRole, expected: int, transition: str) -> None:
+    with _client(role) as client:
+        response = client.post(f"/api/v1/approvals/apr_short/{transition}", json={})
+    assert response.status_code == expected
+
+
+@pytest.mark.parametrize(
+    "request_kwargs",
+    [
+        {"params": {"access_token": _TOKENS[AuthRole.ADMIN]}},
+        {"headers": {"X-Authorization": f"Bearer {_TOKENS[AuthRole.ADMIN]}"}},
+    ],
+)
+def test_alternative_authentication_channels_do_not_bypass(
+    request_kwargs: dict[str, Any],
 ) -> None:
-    provider = RecordingProvider(
-        GHLProviderError(GHLFailureCategory.AUTHENTICATION, GHLOutcomeCertainty.DEFINITIVE)
-    )
-    approvals, executions, _repository, _clock = boundary(
-        phase7_tmp_path / "logs.sqlite3", provider
-    )
-    created = approvals.create(ghl_event(), ghl_intelligence())
-    approvals.approve(created.approval_id)
-    with caplog.at_level(logging.INFO):
-        public = executions.execute(created.approval_id).public().model_dump_json()
-    output = caplog.text + public
-    assert SECRET_MARKER not in output
-    assert CONTACT_ID not in output
-    assert "Authorization" not in output
-    assert "GHL_AUTHENTICATION" not in public
+    with TestClient(create_app(_settings(AuthRole.ADMIN))) as client:
+        response = client.get("/api/v1/admin/status", **request_kwargs)
+    assert response.status_code == 401
 
 
-def test_audit_failure_category_is_hash_bound(phase7_tmp_path: Path) -> None:
-    database = phase7_tmp_path / "audit.sqlite3"
-    provider = RecordingProvider(
-        GHLProviderError(GHLFailureCategory.RATE_LIMIT, GHLOutcomeCertainty.DEFINITIVE)
-    )
-    approvals, executions, repository, _clock = boundary(database, provider)
-    created = approvals.create(ghl_event(), ghl_intelligence())
-    approvals.approve(created.approval_id)
-    executions.execute(created.approval_id)
-    connection = sqlite3.connect(database)
-    try:
-        assert connection.execute(
-            "SELECT failure_category FROM approval_audit_events "
-            "WHERE event_type = 'EXECUTION_FAILED'"
-        ).fetchone() == ("GHL_RATE_LIMIT",)
-        connection.execute(
-            "UPDATE approval_audit_events SET failure_category = 'GHL_UNKNOWN' "
-            "WHERE event_type = 'EXECUTION_FAILED'"
+def test_body_actor_and_role_injection_are_rejected() -> None:
+    with _client(AuthRole.EXECUTOR) as client:
+        response = client.post(
+            "/api/v1/actions/contact-tag",
+            json={
+                "approval_id": "apr_abcdefghijklmnopqrstuvwx",
+                "contact_id": CONTACT_ID,
+                "tag": TAG,
+                "actor_id": "attacker",
+                "role": "ADMIN",
+            },
         )
-        connection.commit()
-    finally:
-        connection.close()
-    assert not repository.verify_audit_chain(created.approval_id)
-    with pytest.raises(ExecutionIntegrityError):
-        executions.execute(created.approval_id)
+    assert response.status_code == 422
+
+
+def test_authentication_failure_rate_limit_is_process_local_and_bounded() -> None:
+    app = create_app(_settings(AuthRole.ADMIN, auth_failure_limit=1))
+    with TestClient(app) as client:
+        assert client.get("/api/v1/admin/status").status_code == 401
+        assert client.get("/api/v1/admin/status").status_code == 429
+    assert app.state.rate_limiter.bucket_count == 2
+
+
+def test_mutation_rate_limit_precedes_business_operation() -> None:
+    with _client(AuthRole.ADMIN, protected_mutation_limit=1) as client:
+        assert client.post("/api/v1/approvals", json={}).status_code == 422
+        assert client.post("/api/v1/approvals", json={}).status_code == 429
+
+
+def test_rate_limiter_resets_fixed_bucket(monkeypatch: pytest.MonkeyPatch) -> None:
+    times = iter((0.0, 0.0, 1.0, 61.0))
+    monkeypatch.setattr("ai_business_automation.security.auth.time.monotonic", lambda: next(times))
+    limiter = ProcessRateLimiter(1, 1)
+    limiter.consume("authentication")
+    limiter.consume("authentication")
+    assert limiter.bucket_count == 2
+
+
+def test_security_audit_hash_chain_excludes_tokens() -> None:
+    with _client(AuthRole.APPROVER) as client:
+        client.post(
+            "/api/v1/approvals",
+            json={},
+            headers={"Authorization": "Bearer fake-invalid-audit-token"},
+        )
+        client.post("/api/v1/approvals", json={})
+    repository = SecurityAuditRepository(Path("phase7.sqlite3"))
+    assert repository.verify()
+    database_bytes = Path("phase7.sqlite3").read_bytes()
+    assert _TOKENS[AuthRole.APPROVER].encode() not in database_bytes
+    with sqlite3.connect("phase7.sqlite3") as connection:
+        events = {
+            row[0] for row in connection.execute("SELECT event_type FROM security_audit_events")
+        }
+        actor, role = connection.execute(
+            "SELECT actor_id, role FROM security_audit_events "
+            "WHERE event_type = 'APPROVAL_AUTHORIZED'"
+        ).fetchone()
+    assert {"AUTHENTICATION_SUCCEEDED", "AUTHENTICATION_FAILED", "APPROVAL_AUTHORIZED"} <= events
+    assert (actor, role) == ("approver-actor", "APPROVER")
+
+
+def test_authenticated_actors_are_bound_to_approval_and_execution_records() -> None:
+    database = Path("phase7.sqlite3")
+    provider = RecordingProvider()
+    approvals, executions, repository, _clock = boundary(database, provider)
+
+    approved = approvals.create(tag_event(), intelligence())
+    approver_app = create_app(_settings(AuthRole.APPROVER))
+    approver_app.dependency_overrides[get_approval_service] = lambda: approvals
+    with TestClient(
+        approver_app, headers={"Authorization": f"Bearer {_TOKENS[AuthRole.APPROVER]}"}
+    ) as client:
+        response = client.post(f"/api/v1/approvals/{approved.approval_id}/approve")
+    assert response.status_code == 200
+    assert approvals.get(approved.approval_id).approver_id == "approver-actor"
+
+    rejected = approvals.create(tag_event(), intelligence())
+    with TestClient(
+        approver_app, headers={"Authorization": f"Bearer {_TOKENS[AuthRole.APPROVER]}"}
+    ) as client:
+        response = client.post(
+            f"/api/v1/approvals/{rejected.approval_id}/reject",
+            json={"reason": "Reviewer denied this request."},
+        )
+    assert response.status_code == 200
+    assert approvals.get(rejected.approval_id).approver_id == "approver-actor"
+
+    executor_app = create_app(_settings(AuthRole.EXECUTOR))
+    executor_app.dependency_overrides[get_execution_service] = lambda: executions
+    with TestClient(
+        executor_app, headers={"Authorization": f"Bearer {_TOKENS[AuthRole.EXECUTOR]}"}
+    ) as client:
+        response = client.post(
+            "/api/v1/actions/contact-tag",
+            json=action_request(approved.approval_id).model_dump(mode="json"),
+        )
+    assert response.status_code == 200
+    execution = repository.get_execution(response.json()["execution_id"])
+    assert execution.actor_id == "executor-actor"
+    assert execution.status is ExecutionStatus.SUCCEEDED
+
+
+def test_authentication_configuration_is_closed_complete_and_unique() -> None:
+    with pytest.raises(ValidationError):
+        Settings(environment=Environment.TEST, auth_token_1=SecretStr("fake-incomplete-token"))
+    with pytest.raises(ValidationError):
+        Settings(
+            environment=Environment.TEST,
+            auth_token_1=SecretStr("fake-duplicate-token"),
+            auth_actor_1="one",
+            auth_role_1=AuthRole.READ_ONLY,
+            auth_token_2=SecretStr("fake-duplicate-token"),
+            auth_actor_2="two",
+            auth_role_2=AuthRole.ADMIN,
+        )
+
+
+def test_test_database_path_is_narrowly_environment_scoped() -> None:
+    test_path = ".test-data/phase7-isolated/audit.sqlite3"
+    configured = _settings(AuthRole.ADMIN, approval_database_path=test_path)
+    assert configured.approval_database_path == test_path
+    for environment, path in (
+        (Environment.PRODUCTION, test_path),
+        (Environment.DEVELOPMENT, test_path),
+        (Environment.TEST, ".untrusted/audit.sqlite3"),
+        (Environment.TEST, "../audit.sqlite3"),
+        (Environment.TEST, "/absolute/audit.sqlite3"),
+        (Environment.TEST, "C:\\absolute\\audit.sqlite3"),
+    ):
+        with pytest.raises(ValidationError):
+            _settings(AuthRole.ADMIN, environment=environment, approval_database_path=path)
+
+
+def test_tokens_are_redacted_and_no_new_action_exists() -> None:
+    record = logging.LogRecord("test", 20, __file__, 1, "event", (), None)
+    record.operation = "safe"
+    assert json.loads(JsonFormatter().format(record))["operation"] == "safe"
+    assert redact(
+        {
+            "Authorization": f"Bearer {_TOKENS[AuthRole.ADMIN]}",
+            "access_token": _TOKENS[AuthRole.ADMIN],
+        }
+    ) == {"Authorization": "[REDACTED]", "access_token": "[REDACTED]"}
+    assert list(ExecutionAction) == [ExecutionAction.ADD_CONTACT_TAG]

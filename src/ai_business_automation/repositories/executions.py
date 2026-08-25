@@ -1,4 +1,4 @@
-"""Transactional SQLite repository for single-use internal executions."""
+"""Transactional SQLite repository for one single-use contact-tag execution."""
 
 import hmac
 import secrets
@@ -11,17 +11,18 @@ from typing import Protocol, cast, runtime_checkable
 from pydantic import ValidationError
 
 from ai_business_automation.models import (
-    ActionOutcome,
+    POLICY_VERSION,
     ApprovalRecord,
     ApprovalStatus,
     AuditEventType,
     ExecutionAction,
     ExecutionFailureCategory,
     ExecutionRecord,
-    ExecutionResultCode,
     ExecutionStatus,
+    GHLAddContactTagParameters,
+    RecommendedAction,
     ReconciliationOutcome,
-    execution_action_for,
+    ReconciliationRecord,
 )
 from ai_business_automation.repositories.approvals import (
     SQLiteApprovalRepository,
@@ -29,16 +30,14 @@ from ai_business_automation.repositories.approvals import (
     _datetime_text,
     _record_from_row,
 )
-from ai_business_automation.services.approval_errors import (
-    ProvenanceIntegrityError,
-    SchemaCompatibilityError,
-)
+from ai_business_automation.services.approval_errors import ProvenanceIntegrityError
 from ai_business_automation.services.execution_errors import (
+    ActionNotAllowedError,
     ApprovalNotApprovedError,
     ApprovalProvenanceInvalidError,
+    ExecutionAlreadyAssessedError,
     ExecutionAlreadyClaimedError,
     ExecutionAlreadyCompletedError,
-    ExecutionAlreadyReconciledError,
     ExecutionApprovalExpiredError,
     ExecutionBoundaryError,
     ExecutionConflictError,
@@ -46,8 +45,7 @@ from ai_business_automation.services.execution_errors import (
     ExecutionNotFoundError,
     ExecutionNotReconciliableError,
     ExecutionPersistenceError,
-    ReconciliationApprovalIntegrityError,
-    ReconciliationConflictError,
+    ReconciliationIntegrityError,
 )
 from ai_business_automation.services.provenance import canonical_json_bytes, sha256_hex
 
@@ -56,55 +54,25 @@ CREATE TABLE IF NOT EXISTS executions (
     execution_id TEXT PRIMARY KEY CHECK(length(execution_id) BETWEEN 24 AND 40),
     approval_id TEXT NOT NULL UNIQUE,
     event_id TEXT NOT NULL CHECK(length(event_id) BETWEEN 20 AND 40),
-    action TEXT NOT NULL CHECK(action IN (
-        'NO_OP', 'CREATE_INTERNAL_TASK', 'UPDATE_INTERNAL_STATUS',
-        'REQUEST_HUMAN_REVIEW', 'GENERATE_INTERNAL_NOTE', 'GHL_ADD_CONTACT_TAG'
-    )),
-    status TEXT NOT NULL CHECK(status IN (
-        'PENDING', 'CLAIMED', 'SUCCEEDED', 'FAILED', 'UNKNOWN',
-        'RECONCILED_SUCCEEDED', 'RECONCILED_FAILED'
-    )),
-    started_at TEXT NOT NULL CHECK(length(started_at) BETWEEN 20 AND 40),
+    action TEXT NOT NULL CHECK(action = 'ADD_CONTACT_TAG'),
+    contact_id TEXT NOT NULL CHECK(length(contact_id) BETWEEN 10 AND 40),
+    tag TEXT NOT NULL CHECK(length(tag) BETWEEN 1 AND 50),
+    status TEXT NOT NULL CHECK(status IN ('PENDING', 'CLAIMED', 'SUCCEEDED', 'FAILED', 'UNKNOWN')),
+    created_at TEXT NOT NULL CHECK(length(created_at) BETWEEN 20 AND 40),
+    claimed_at TEXT NOT NULL CHECK(length(claimed_at) BETWEEN 20 AND 40),
     completed_at TEXT CHECK(completed_at IS NULL OR length(completed_at) BETWEEN 20 AND 40),
-    result_code TEXT CHECK(result_code IN (
-        'COMPLETED', 'DEFINITIVE_FAILURE', 'OUTCOME_UNKNOWN', 'RECONCILED'
-    )),
-    safe_summary TEXT CHECK(safe_summary IS NULL OR length(safe_summary) BETWEEN 1 AND 200),
-    actor_id TEXT NOT NULL CHECK(length(actor_id) BETWEEN 1 AND 64),
     failure_category TEXT CHECK(failure_category IS NULL OR failure_category IN (
-        'ACTION_NOT_ALLOWED', 'INTERNAL_FAILURE', 'INTERNAL_UNKNOWN',
-        'GHL_AUTHENTICATION', 'GHL_AUTHORIZATION', 'GHL_RATE_LIMIT',
-        'GHL_VALIDATION', 'GHL_NOT_FOUND', 'GHL_TIMEOUT', 'GHL_NETWORK',
-        'GHL_SERVER_ERROR', 'GHL_UNKNOWN'
+        'VALIDATION_ERROR', 'APPROVAL_INVALID', 'APPROVAL_EXPIRED', 'ALREADY_EXECUTED',
+        'PROVIDER_AUTHENTICATION', 'PROVIDER_RATE_LIMIT', 'PROVIDER_BAD_REQUEST',
+        'PROVIDER_UNAVAILABLE', 'PROVIDER_TIMEOUT', 'PROVIDER_ERROR', 'UNKNOWN_OUTCOME',
+        'PERSISTENCE_ERROR', 'INTERNAL_ERROR'
     )),
-    action_parameters_hash TEXT CHECK(
-        action_parameters_hash IS NULL OR length(action_parameters_hash) = 64
-    ),
-    effect_hash TEXT CHECK(effect_hash IS NULL OR length(effect_hash) = 64),
-    reconciled_at TEXT CHECK(reconciled_at IS NULL OR length(reconciled_at) BETWEEN 20 AND 40),
-    reconciler_id TEXT CHECK(reconciler_id IS NULL OR length(reconciler_id) BETWEEN 1 AND 64),
-    reconciliation_reason TEXT CHECK(
-        reconciliation_reason IS NULL OR length(reconciliation_reason) BETWEEN 1 AND 500
-    ),
-    original_execution_hash TEXT CHECK(
-        original_execution_hash IS NULL OR length(original_execution_hash) = 64
-    ),
-    reconciliation_hash TEXT CHECK(
-        reconciliation_hash IS NULL OR length(reconciliation_hash) = 64
-    ),
+    provenance_hash TEXT NOT NULL CHECK(length(provenance_hash) = 64),
+    policy_version TEXT NOT NULL CHECK(policy_version = '1.0'),
+    actor_id TEXT NOT NULL CHECK(length(actor_id) BETWEEN 1 AND 64),
+    action_parameters_hash TEXT NOT NULL CHECK(length(action_parameters_hash) = 64),
     integrity_hash TEXT NOT NULL CHECK(length(integrity_hash) = 64),
     FOREIGN KEY(approval_id) REFERENCES approvals(approval_id) ON DELETE RESTRICT
-);
-
-CREATE TABLE IF NOT EXISTS internal_action_effects (
-    execution_id TEXT PRIMARY KEY,
-    object_id TEXT UNIQUE CHECK(object_id IS NULL OR length(object_id) BETWEEN 24 AND 48),
-    object_type TEXT NOT NULL CHECK(object_type IN (
-        'NONE', 'INTERNAL_TASK', 'INTERNAL_STATUS', 'HUMAN_REVIEW', 'INTERNAL_NOTE'
-    )),
-    content TEXT NOT NULL CHECK(length(content) BETWEEN 1 AND 1000),
-    created_at TEXT NOT NULL CHECK(length(created_at) BETWEEN 20 AND 40),
-    FOREIGN KEY(execution_id) REFERENCES executions(execution_id) ON DELETE RESTRICT
 );
 """
 
@@ -122,9 +90,7 @@ class ExecutionRepository(Protocol):
         execution_id: str,
         target: ExecutionStatus,
         now: datetime,
-        safe_summary: str,
-        outcome: ActionOutcome | None = None,
-        failure_category: ExecutionFailureCategory | None = None,
+        failure_category: ExecutionFailureCategory | None,
     ) -> ExecutionRecord: ...
 
     def get_execution(self, execution_id: str) -> ExecutionRecord: ...
@@ -135,14 +101,16 @@ class ExecutionRepository(Protocol):
         outcome: ReconciliationOutcome,
         reason: str,
         now: datetime,
-        reconciler_id: str,
-    ) -> ExecutionRecord: ...
+        actor_id: str,
+    ) -> ReconciliationRecord: ...
+
+    def get_reconciliation(self, execution_id: str) -> ReconciliationRecord: ...
 
     def verify_integrity(self, execution_id: str) -> bool: ...
 
 
 class SQLiteExecutionRepository(SQLiteApprovalRepository):
-    """Use the approval database and hash chain as one transactional trust boundary."""
+    """Use approval provenance and audit chain as one atomic trust boundary."""
 
     def __init__(
         self,
@@ -156,14 +124,6 @@ class SQLiteExecutionRepository(SQLiteApprovalRepository):
 
     def initialize(self) -> None:
         super().initialize()
-        connection = self._connect()
-        try:
-            connection.executescript(_EXECUTION_SCHEMA)
-            _require_phase8_execution_schema(connection)
-        except sqlite3.Error as exc:
-            raise ExecutionPersistenceError from exc
-        finally:
-            connection.close()
 
     def claim(
         self, approval_id: str, now: datetime, actor_id: str
@@ -183,90 +143,88 @@ class SQLiteExecutionRepository(SQLiteApprovalRepository):
                 ValueError,
                 ValidationError,
             ) as exc:
-                self._append_execution_rejected(connection, approval_row, now, actor_id)
-                connection.commit()
                 raise ApprovalProvenanceInvalidError from exc
-
             approval = _record_from_row(approval_row)
-            if approval.status is ApprovalStatus.EXPIRED:
-                self._append_execution_rejected(connection, approval_row, now, actor_id)
-                connection.commit()
+            if approval.status is ApprovalStatus.EXPIRED or now >= approval.expires_at:
                 raise ExecutionApprovalExpiredError
             if approval.status is not ApprovalStatus.APPROVED:
-                self._append_execution_rejected(connection, approval_row, now, actor_id)
-                connection.commit()
                 raise ApprovalNotApprovedError
-            if now >= approval.expires_at:
-                self._append_execution_rejected(connection, approval_row, now, actor_id)
-                connection.commit()
-                raise ExecutionApprovalExpiredError
-
+            if (
+                approval.policy_version != POLICY_VERSION
+                or approval.action is not RecommendedAction.ADD_CONTACT_TAG
+                or approval.action_parameters is None
+            ):
+                raise ActionNotAllowedError
+            trusted_parameters = GHLAddContactTagParameters.model_validate(
+                approval.action_parameters
+            )
             existing = connection.execute(
-                "SELECT * FROM executions WHERE approval_id = ?", (approval_id,)
+                "SELECT status FROM executions WHERE approval_id = ?", (approval_id,)
             ).fetchone()
             if existing is not None:
                 connection.commit()
-                status = ExecutionStatus(existing["status"])
-                if status is ExecutionStatus.CLAIMED:
+                if ExecutionStatus(existing["status"]) is ExecutionStatus.CLAIMED:
                     raise ExecutionAlreadyClaimedError
                 raise ExecutionAlreadyCompletedError
 
             execution_id = self._execution_id_factory()
-            action = execution_action_for(approval.action)
-            action_parameters_hash = (
-                sha256_hex(canonical_json_bytes(approval.action_parameters.model_dump(mode="json")))
-                if approval.action_parameters is not None
-                else None
+            timestamp = _datetime_text(now)
+            parameters_hash = sha256_hex(
+                canonical_json_bytes(trusted_parameters.model_dump(mode="json"))
             )
-            started_at = _datetime_text(now)
-            claimed_hash = _execution_hash(
+            integrity_hash = _execution_hash(
                 execution_id=execution_id,
                 approval_id=approval_id,
                 event_id=approval.event_id,
-                action=action,
+                contact_id=trusted_parameters.contact_id,
+                tag=trusted_parameters.tag,
                 status=ExecutionStatus.CLAIMED,
-                started_at=started_at,
+                created_at=timestamp,
+                claimed_at=timestamp,
                 completed_at=None,
-                result_code=None,
-                safe_summary=None,
-                actor_id=actor_id,
                 failure_category=None,
-                action_parameters_hash=action_parameters_hash,
+                provenance_hash=approval.provenance_hash,
+                policy_version=approval.policy_version,
+                actor_id=actor_id,
+                action_parameters_hash=parameters_hash,
             )
             connection.execute(
                 """
                 INSERT INTO executions (
-                    execution_id, approval_id, event_id, action, status, started_at,
-                    completed_at, result_code, safe_summary, actor_id, failure_category,
-                    action_parameters_hash, effect_hash, integrity_hash
-                ) VALUES (?, ?, ?, ?, 'PENDING', ?, NULL, NULL, NULL, ?, NULL, ?, NULL, ?)
+                    execution_id, approval_id, event_id, action, contact_id, tag, status,
+                    created_at, claimed_at, completed_at, failure_category, provenance_hash,
+                    policy_version, actor_id, action_parameters_hash, integrity_hash
+                ) VALUES (
+                    ?, ?, ?, 'ADD_CONTACT_TAG', ?, ?, 'PENDING', ?, ?, NULL, NULL, ?, ?, ?, ?, ?
+                )
                 """,
                 (
                     execution_id,
                     approval_id,
                     approval.event_id,
-                    action.value,
-                    started_at,
+                    trusted_parameters.contact_id,
+                    trusted_parameters.tag,
+                    timestamp,
+                    timestamp,
+                    approval.provenance_hash,
+                    approval.policy_version,
                     actor_id,
-                    action_parameters_hash,
-                    claimed_hash,
+                    parameters_hash,
+                    integrity_hash,
                 ),
             )
             self._append_execution_event(
                 connection,
                 approval_row,
                 execution_id,
-                approval.event_id,
-                AuditEventType.EXECUTION_CREATED,
+                AuditEventType.EXECUTION_AUTHORIZED,
                 ExecutionStatus.PENDING,
                 now,
                 actor_id,
             )
             cursor = connection.execute(
-                """
-                UPDATE executions SET status = 'CLAIMED'
-                WHERE execution_id = ? AND status = 'PENDING'
-                """,
+                "UPDATE executions SET status = 'CLAIMED' "
+                "WHERE execution_id = ? AND status = 'PENDING'",
                 (execution_id,),
             )
             if cursor.rowcount != 1:
@@ -276,15 +234,13 @@ class SQLiteExecutionRepository(SQLiteApprovalRepository):
                 connection,
                 approval_row,
                 execution_id,
-                approval.event_id,
                 AuditEventType.EXECUTION_CLAIMED,
                 ExecutionStatus.CLAIMED,
                 now,
                 actor_id,
             )
             connection.commit()
-            record = self._required_execution(connection, execution_id)
-            return _execution_from_row(record), approval
+            return _execution_from_row(self._required_execution(connection, execution_id)), approval
         except ExecutionBoundaryError:
             connection.rollback()
             raise
@@ -305,9 +261,7 @@ class SQLiteExecutionRepository(SQLiteApprovalRepository):
         execution_id: str,
         target: ExecutionStatus,
         now: datetime,
-        safe_summary: str,
-        outcome: ActionOutcome | None = None,
-        failure_category: ExecutionFailureCategory | None = None,
+        failure_category: ExecutionFailureCategory | None,
     ) -> ExecutionRecord:
         if target not in {
             ExecutionStatus.SUCCEEDED,
@@ -315,93 +269,29 @@ class SQLiteExecutionRepository(SQLiteApprovalRepository):
             ExecutionStatus.UNKNOWN,
         }:
             raise ExecutionConflictError
+        if (target is ExecutionStatus.SUCCEEDED) != (failure_category is None):
+            raise ExecutionConflictError
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
             row = self._required_execution(connection, execution_id)
             approval_row = self._required_row(connection, str(row["approval_id"]))
             self._verify_execution(connection, row, approval_row)
-            current = ExecutionStatus(row["status"])
-            if current is not ExecutionStatus.CLAIMED:
-                if current in {
-                    ExecutionStatus.SUCCEEDED,
-                    ExecutionStatus.FAILED,
-                    ExecutionStatus.UNKNOWN,
-                }:
-                    raise ExecutionAlreadyCompletedError
-                raise ExecutionConflictError
-
-            result_code = {
-                ExecutionStatus.SUCCEEDED: ExecutionResultCode.COMPLETED,
-                ExecutionStatus.FAILED: ExecutionResultCode.DEFINITIVE_FAILURE,
-                ExecutionStatus.UNKNOWN: ExecutionResultCode.OUTCOME_UNKNOWN,
-            }[target]
-            if (target is ExecutionStatus.SUCCEEDED) != (failure_category is None):
-                raise ExecutionConflictError
-            if target is ExecutionStatus.SUCCEEDED:
-                if outcome is None:
-                    raise ExecutionConflictError
-                if outcome.effect is not None:
-                    connection.execute(
-                        """
-                        INSERT INTO internal_action_effects (
-                            execution_id, object_id, object_type, content, created_at
-                        ) VALUES (?, ?, ?, ?, ?)
-                        """,
-                        (
-                            execution_id,
-                            outcome.effect.object_id,
-                            outcome.effect.object_type,
-                            outcome.effect.content,
-                            _datetime_text(now),
-                        ),
-                    )
-                effect_hash = sha256_hex(
-                    canonical_json_bytes(
-                        outcome.effect.model_dump(mode="json")
-                        if outcome.effect is not None
-                        else None
-                    )
-                )
-            elif outcome is not None:
-                raise ExecutionConflictError
-            else:
-                effect_hash = None
-
-            completed_text = _datetime_text(now)
-            integrity_hash = _execution_hash(
-                execution_id=execution_id,
-                approval_id=str(row["approval_id"]),
-                event_id=str(row["event_id"]),
-                action=ExecutionAction(row["action"]),
-                status=target,
-                started_at=str(row["started_at"]),
-                completed_at=completed_text,
-                result_code=result_code,
-                safe_summary=safe_summary,
-                actor_id=str(row["actor_id"]),
-                effect_hash=effect_hash,
-                failure_category=failure_category,
-                action_parameters_hash=(
-                    str(row["action_parameters_hash"])
-                    if row["action_parameters_hash"] is not None
-                    else None
-                ),
+            if ExecutionStatus(row["status"]) is not ExecutionStatus.CLAIMED:
+                raise ExecutionAlreadyCompletedError
+            completed_at = _datetime_text(now)
+            integrity_hash = _execution_hash_from_row(
+                row, status=target, completed_at=completed_at, failure_category=failure_category
             )
             cursor = connection.execute(
                 """
-                UPDATE executions
-                SET status = ?, completed_at = ?, result_code = ?, safe_summary = ?,
-                    failure_category = ?, effect_hash = ?, integrity_hash = ?
-                WHERE execution_id = ? AND status = 'CLAIMED'
+                UPDATE executions SET status = ?, completed_at = ?, failure_category = ?,
+                    integrity_hash = ? WHERE execution_id = ? AND status = 'CLAIMED'
                 """,
                 (
                     target.value,
-                    completed_text,
-                    result_code.value,
-                    safe_summary,
+                    completed_at,
                     failure_category.value if failure_category is not None else None,
-                    effect_hash,
                     integrity_hash,
                     execution_id,
                 ),
@@ -418,7 +308,6 @@ class SQLiteExecutionRepository(SQLiteApprovalRepository):
                 connection,
                 approval_row,
                 execution_id,
-                str(row["event_id"]),
                 event_type,
                 target,
                 now,
@@ -430,9 +319,6 @@ class SQLiteExecutionRepository(SQLiteApprovalRepository):
         except ExecutionBoundaryError:
             connection.rollback()
             raise
-        except sqlite3.IntegrityError as exc:
-            connection.rollback()
-            raise ExecutionConflictError from exc
         except sqlite3.Error as exc:
             connection.rollback()
             raise ExecutionPersistenceError from exc
@@ -464,154 +350,142 @@ class SQLiteExecutionRepository(SQLiteApprovalRepository):
         outcome: ReconciliationOutcome,
         reason: str,
         now: datetime,
-        reconciler_id: str,
-    ) -> ExecutionRecord:
+        actor_id: str,
+    ) -> ReconciliationRecord:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
             row = self._required_execution(connection, execution_id)
             approval_row = self._required_row(connection, str(row["approval_id"]))
-            try:
-                self._verify_execution(connection, row, approval_row)
-            except ApprovalProvenanceInvalidError as exc:
-                raise ReconciliationApprovalIntegrityError from exc
-            current = ExecutionStatus(row["status"])
-            if current in {
-                ExecutionStatus.RECONCILED_SUCCEEDED,
-                ExecutionStatus.RECONCILED_FAILED,
-            }:
-                self._append_reconciliation_rejected(
-                    connection, approval_row, row, now, reconciler_id
-                )
-                connection.commit()
-                raise ExecutionAlreadyReconciledError
+            self._verify_execution(connection, row, approval_row)
             if (
-                current is not ExecutionStatus.UNKNOWN
-                or ExecutionAction(row["action"]) is not ExecutionAction.GHL_ADD_CONTACT_TAG
+                ExecutionStatus(row["status"]) is not ExecutionStatus.UNKNOWN
+                or ExecutionAction(row["action"]) is not ExecutionAction.ADD_CONTACT_TAG
             ):
-                self._append_reconciliation_rejected(
-                    connection, approval_row, row, now, reconciler_id
-                )
-                connection.commit()
                 raise ExecutionNotReconciliableError
-
-            target = {
-                ReconciliationOutcome.SUCCEEDED: ExecutionStatus.RECONCILED_SUCCEEDED,
-                ReconciliationOutcome.FAILED: ExecutionStatus.RECONCILED_FAILED,
-            }[outcome]
-            reconciled_text = _datetime_text(now)
+            if (
+                connection.execute(
+                    "SELECT 1 FROM execution_reconciliation_assessments WHERE execution_id = ?",
+                    (execution_id,),
+                ).fetchone()
+                is not None
+            ):
+                raise ExecutionAlreadyAssessedError
+            assessment_id = f"rcn_{secrets.token_urlsafe(18)}"
+            occurred_at = _datetime_text(now)
             original_hash = str(row["integrity_hash"])
-            approval = _record_from_row(approval_row)
-            commitment_hash = _reconciliation_hash(
-                execution_id=execution_id,
-                approval_id=approval.approval_id,
-                event_id=str(row["event_id"]),
-                action=ExecutionAction(row["action"]),
-                original_status=ExecutionStatus.UNKNOWN,
-                outcome=outcome,
-                reason=reason,
-                policy_version=approval.policy_version,
-                original_execution_hash=original_hash,
-                reconciler_id=reconciler_id,
-                reconciled_at=reconciled_text,
+            previous_hash = "0" * 64
+            payload = {
+                "actor_id": actor_id,
+                "approval_id": row["approval_id"],
+                "assessment_id": assessment_id,
+                "declared_outcome": outcome.value,
+                "execution_id": execution_id,
+                "occurred_at": occurred_at,
+                "original_execution_integrity_hash": original_hash,
+                "policy_version": row["policy_version"],
+                "provenance_hash": row["provenance_hash"],
+                "reason": reason,
+            }
+            assessment_hash = sha256_hex(
+                canonical_json_bytes(payload) + previous_hash.encode("ascii")
             )
-            self._append_execution_event(
-                connection,
-                approval_row,
-                execution_id,
-                str(row["event_id"]),
-                AuditEventType.EXECUTION_RECONCILIATION_REQUESTED,
-                ExecutionStatus.UNKNOWN,
-                now,
-                reconciler_id,
-                commitment_hash=commitment_hash,
-            )
-            summary = (
-                "Execution externally reconciled as succeeded."
-                if outcome is ReconciliationOutcome.SUCCEEDED
-                else "Execution externally reconciled as failed."
-            )
-            integrity_hash = _execution_hash(
-                execution_id=execution_id,
-                approval_id=approval.approval_id,
-                event_id=str(row["event_id"]),
-                action=ExecutionAction(row["action"]),
-                status=target,
-                started_at=str(row["started_at"]),
-                completed_at=str(row["completed_at"]),
-                result_code=ExecutionResultCode.RECONCILED,
-                safe_summary=summary,
-                actor_id=str(row["actor_id"]),
-                effect_hash=str(row["effect_hash"]) if row["effect_hash"] is not None else None,
-                failure_category=(
-                    ExecutionFailureCategory(row["failure_category"])
-                    if row["failure_category"] is not None
-                    else None
-                ),
-                action_parameters_hash=(
-                    str(row["action_parameters_hash"])
-                    if row["action_parameters_hash"] is not None
-                    else None
-                ),
-                reconciled_at=reconciled_text,
-                reconciler_id=reconciler_id,
-                reconciliation_reason=reason,
-                original_execution_hash=original_hash,
-                reconciliation_hash=commitment_hash,
-            )
-            cursor = connection.execute(
+            connection.execute(
                 """
-                UPDATE executions
-                SET status = ?, result_code = 'RECONCILED', safe_summary = ?,
-                    reconciled_at = ?, reconciler_id = ?, reconciliation_reason = ?,
-                    original_execution_hash = ?, reconciliation_hash = ?, integrity_hash = ?
-                WHERE execution_id = ? AND status = 'UNKNOWN'
+                INSERT INTO execution_reconciliation_assessments (
+                    assessment_id, execution_id, approval_id, provenance_hash,
+                    policy_version, original_execution_integrity_hash, actor_id,
+                    occurred_at, declared_outcome, reason, previous_assessment_hash,
+                    assessment_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    target.value,
-                    summary,
-                    reconciled_text,
-                    reconciler_id,
-                    reason,
-                    original_hash,
-                    commitment_hash,
-                    integrity_hash,
+                    assessment_id,
                     execution_id,
+                    row["approval_id"],
+                    row["provenance_hash"],
+                    row["policy_version"],
+                    original_hash,
+                    actor_id,
+                    occurred_at,
+                    outcome.value,
+                    reason,
+                    previous_hash,
+                    assessment_hash,
                 ),
             )
-            if cursor.rowcount != 1:
-                raise ReconciliationConflictError
-            approval_row = self._required_row(connection, approval.approval_id)
-            event_type = (
-                AuditEventType.EXECUTION_RECONCILED_SUCCEEDED
-                if target is ExecutionStatus.RECONCILED_SUCCEEDED
-                else AuditEventType.EXECUTION_RECONCILED_FAILED
-            )
-            self._append_execution_event(
+            approval_row = self._required_row(connection, str(row["approval_id"]))
+            self._append_audit(
                 connection,
-                approval_row,
-                execution_id,
-                str(row["event_id"]),
-                event_type,
-                target,
-                now,
-                reconciler_id,
-                commitment_hash=commitment_hash,
+                approval_id=str(row["approval_id"]),
+                event_type=AuditEventType.RECONCILIATION_RECORDED,
+                status=ExecutionStatus.UNKNOWN.value,
+                actor_id=actor_id,
+                occurred_at=now,
+                previous_hash=str(approval_row["audit_head_hash"]),
+                sequence_number=int(approval_row["audit_event_count"]) + 1,
+                execution_id=execution_id,
+                event_id=str(row["event_id"]),
+                commitment_hash=assessment_hash,
             )
             connection.commit()
-            return _execution_from_row(self._required_execution(connection, execution_id))
+            return self.get_reconciliation(execution_id)
         except ExecutionBoundaryError:
             connection.rollback()
             raise
         except sqlite3.IntegrityError as exc:
             connection.rollback()
-            raise ReconciliationConflictError from exc
+            raise ExecutionAlreadyAssessedError from exc
         except sqlite3.Error as exc:
             connection.rollback()
             raise ExecutionPersistenceError from exc
         except (KeyError, TypeError, ValueError, ValidationError) as exc:
             connection.rollback()
-            raise ExecutionIntegrityError from exc
+            raise ReconciliationIntegrityError from exc
+        finally:
+            connection.close()
+
+    def get_reconciliation(self, execution_id: str) -> ReconciliationRecord:
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT * FROM execution_reconciliation_assessments WHERE execution_id = ?",
+                (execution_id,),
+            ).fetchone()
+            if row is None:
+                raise ExecutionNotFoundError
+            record = _reconciliation_from_row(row)
+            payload = {
+                "actor_id": record.actor_id,
+                "approval_id": record.approval_id,
+                "assessment_id": record.assessment_id,
+                "declared_outcome": record.declared_outcome.value,
+                "execution_id": record.execution_id,
+                "occurred_at": _datetime_text(record.occurred_at),
+                "original_execution_integrity_hash": (record.original_execution_integrity_hash),
+                "policy_version": record.policy_version,
+                "provenance_hash": record.provenance_hash,
+                "reason": record.reason,
+            }
+            expected = sha256_hex(
+                canonical_json_bytes(payload) + record.previous_assessment_hash.encode("ascii")
+            )
+            execution = self._required_execution(connection, execution_id)
+            if (
+                not hmac.compare_digest(expected, record.assessment_hash)
+                or record.previous_assessment_hash != "0" * 64
+                or ExecutionStatus(execution["status"]) is not ExecutionStatus.UNKNOWN
+                or execution["integrity_hash"] != record.original_execution_integrity_hash
+                or execution["provenance_hash"] != record.provenance_hash
+            ):
+                raise ReconciliationIntegrityError
+            return record
+        except ExecutionBoundaryError:
+            raise
+        except sqlite3.Error as exc:
+            raise ExecutionPersistenceError from exc
+        except (KeyError, TypeError, ValueError, ValidationError) as exc:
+            raise ReconciliationIntegrityError from exc
         finally:
             connection.close()
 
@@ -635,10 +509,7 @@ class SQLiteExecutionRepository(SQLiteApprovalRepository):
         return row
 
     def _verify_execution(
-        self,
-        connection: sqlite3.Connection,
-        row: sqlite3.Row,
-        approval_row: sqlite3.Row,
+        self, connection: sqlite3.Connection, row: sqlite3.Row, approval_row: sqlite3.Row
     ) -> None:
         if not self._verify_audit_chain(connection, approval_row):
             raise ExecutionIntegrityError
@@ -648,131 +519,45 @@ class SQLiteExecutionRepository(SQLiteApprovalRepository):
             raise ApprovalProvenanceInvalidError from exc
         approval = _record_from_row(approval_row)
         record = _execution_from_row(row)
-        expected_hash = _execution_hash(
-            execution_id=record.execution_id,
-            approval_id=record.approval_id,
-            event_id=record.event_id,
-            action=record.action,
-            status=record.status,
-            started_at=_datetime_text(record.started_at),
-            completed_at=(
-                _datetime_text(record.completed_at) if record.completed_at is not None else None
-            ),
-            result_code=record.result_code,
-            safe_summary=record.safe_summary,
-            actor_id=record.actor_id,
-            effect_hash=str(row["effect_hash"]) if row["effect_hash"] is not None else None,
-            failure_category=record.failure_category,
-            action_parameters_hash=(
-                str(row["action_parameters_hash"])
-                if row["action_parameters_hash"] is not None
-                else None
-            ),
-            reconciled_at=(str(row["reconciled_at"]) if row["reconciled_at"] is not None else None),
-            reconciler_id=(str(row["reconciler_id"]) if row["reconciler_id"] is not None else None),
-            reconciliation_reason=(
-                str(row["reconciliation_reason"])
-                if row["reconciliation_reason"] is not None
-                else None
-            ),
-            original_execution_hash=(
-                str(row["original_execution_hash"])
-                if row["original_execution_hash"] is not None
-                else None
-            ),
-            reconciliation_hash=(
-                str(row["reconciliation_hash"]) if row["reconciliation_hash"] is not None else None
-            ),
+        expected = _execution_hash_from_row(row)
+        parameters_hash = sha256_hex(
+            canonical_json_bytes({"contact_id": record.contact_id, "tag": record.tag})
         )
-        effect_row = connection.execute(
-            """
-            SELECT object_id, object_type, content FROM internal_action_effects
-            WHERE execution_id = ?
-            """,
-            (record.execution_id,),
-        ).fetchone()
-        effect_valid = _effect_is_valid(record, row, effect_row)
-        expected_parameters_hash = (
-            sha256_hex(canonical_json_bytes(approval.action_parameters.model_dump(mode="json")))
-            if approval.action_parameters is not None
-            else None
-        )
-        reconciliation_valid = _reconciliation_is_valid(record, row, approval.policy_version)
         if (
-            not hmac.compare_digest(expected_hash, str(row["integrity_hash"]))
-            or not effect_valid
-            or record.approval_id != approval.approval_id
-            or record.event_id != approval.event_id
-            or record.action is not execution_action_for(approval.action)
-            or row["action_parameters_hash"] != expected_parameters_hash
-            or not reconciliation_valid
+            not hmac.compare_digest(expected, str(row["integrity_hash"]))
+            or not hmac.compare_digest(parameters_hash, str(row["action_parameters_hash"]))
+            or approval.action_parameters is None
+            or approval.action_parameters.contact_id != record.contact_id
+            or approval.action_parameters.tag != record.tag
+            or approval.provenance_hash != record.provenance_hash
+            or approval.policy_version != record.policy_version
+            or approval.action is not RecommendedAction.ADD_CONTACT_TAG
         ):
             raise ExecutionIntegrityError
-
-    def _append_execution_rejected(
-        self,
-        connection: sqlite3.Connection,
-        approval_row: sqlite3.Row,
-        now: datetime,
-        actor_id: str,
-        failure_category: ExecutionFailureCategory | None = None,
-    ) -> None:
-        self._append_execution_event(
-            connection,
-            approval_row,
-            None,
-            str(approval_row["event_id"]),
-            AuditEventType.EXECUTION_REJECTED,
-            str(approval_row["status"]),
-            now,
-            actor_id,
-        )
-
-    def _append_reconciliation_rejected(
-        self,
-        connection: sqlite3.Connection,
-        approval_row: sqlite3.Row,
-        execution_row: sqlite3.Row,
-        now: datetime,
-        actor_id: str,
-    ) -> None:
-        self._append_execution_event(
-            connection,
-            approval_row,
-            str(execution_row["execution_id"]),
-            str(execution_row["event_id"]),
-            AuditEventType.EXECUTION_RECONCILIATION_REJECTED,
-            str(execution_row["status"]),
-            now,
-            actor_id,
-        )
 
     def _append_execution_event(
         self,
         connection: sqlite3.Connection,
         approval_row: sqlite3.Row,
-        execution_id: str | None,
-        event_id: str,
+        execution_id: str,
         event_type: AuditEventType,
-        status: ExecutionStatus | str,
+        status: ExecutionStatus,
         now: datetime,
         actor_id: str,
         failure_category: ExecutionFailureCategory | None = None,
-        commitment_hash: str | None = None,
     ) -> None:
         self._append_audit(
             connection,
             approval_id=str(approval_row["approval_id"]),
             event_type=event_type,
-            status=status.value if isinstance(status, ExecutionStatus) else status,
+            status=status.value,
             actor_id=actor_id,
             occurred_at=now,
             previous_hash=str(approval_row["audit_head_hash"]),
             sequence_number=int(approval_row["audit_event_count"]) + 1,
             execution_id=execution_id,
-            event_id=event_id,
+            event_id=str(approval_row["event_id"]),
             failure_category=(failure_category.value if failure_category is not None else None),
-            commitment_hash=commitment_hash,
         )
 
 
@@ -785,47 +570,75 @@ def _execution_hash(
     execution_id: str,
     approval_id: str,
     event_id: str,
-    action: ExecutionAction,
+    contact_id: str,
+    tag: str,
     status: ExecutionStatus,
-    started_at: str,
+    created_at: str,
+    claimed_at: str,
     completed_at: str | None,
-    result_code: ExecutionResultCode | None,
-    safe_summary: str | None,
+    failure_category: ExecutionFailureCategory | None,
+    provenance_hash: str,
+    policy_version: str,
     actor_id: str,
-    effect_hash: str | None = None,
-    failure_category: ExecutionFailureCategory | None = None,
-    action_parameters_hash: str | None = None,
-    reconciled_at: str | None = None,
-    reconciler_id: str | None = None,
-    reconciliation_reason: str | None = None,
-    original_execution_hash: str | None = None,
-    reconciliation_hash: str | None = None,
+    action_parameters_hash: str,
 ) -> str:
     return sha256_hex(
         canonical_json_bytes(
             {
-                "action": action.value,
+                "action": ExecutionAction.ADD_CONTACT_TAG.value,
+                "action_parameters_hash": action_parameters_hash,
                 "actor_id": actor_id,
                 "approval_id": approval_id,
+                "claimed_at": claimed_at,
                 "completed_at": completed_at,
+                "contact_id": contact_id,
+                "created_at": created_at,
                 "event_id": event_id,
-                "effect_hash": effect_hash,
-                "failure_category": (
-                    failure_category.value if failure_category is not None else None
-                ),
-                "action_parameters_hash": action_parameters_hash,
-                "reconciled_at": reconciled_at,
-                "reconciler_id": reconciler_id,
-                "reconciliation_reason": reconciliation_reason,
-                "original_execution_hash": original_execution_hash,
-                "reconciliation_hash": reconciliation_hash,
                 "execution_id": execution_id,
-                "result_code": result_code.value if result_code is not None else None,
-                "safe_summary": safe_summary,
-                "started_at": started_at,
+                "failure_category": failure_category.value
+                if failure_category is not None
+                else None,
+                "policy_version": policy_version,
+                "provenance_hash": provenance_hash,
                 "status": status.value,
+                "tag": tag,
             }
         )
+    )
+
+
+def _execution_hash_from_row(
+    row: sqlite3.Row,
+    *,
+    status: ExecutionStatus | None = None,
+    completed_at: str | None = None,
+    failure_category: ExecutionFailureCategory | None = None,
+) -> str:
+    active_status = status or ExecutionStatus(row["status"])
+    active_failure = (
+        failure_category
+        if status is not None
+        else ExecutionFailureCategory(row["failure_category"])
+        if row["failure_category"] is not None
+        else None
+    )
+    return _execution_hash(
+        execution_id=str(row["execution_id"]),
+        approval_id=str(row["approval_id"]),
+        event_id=str(row["event_id"]),
+        contact_id=str(row["contact_id"]),
+        tag=str(row["tag"]),
+        status=active_status,
+        created_at=str(row["created_at"]),
+        claimed_at=str(row["claimed_at"]),
+        completed_at=completed_at
+        if status is not None
+        else (str(row["completed_at"]) if row["completed_at"] is not None else None),
+        failure_category=active_failure,
+        provenance_hash=str(row["provenance_hash"]),
+        policy_version=str(row["policy_version"]),
+        actor_id=str(row["actor_id"]),
+        action_parameters_hash=str(row["action_parameters_hash"]),
     )
 
 
@@ -835,141 +648,35 @@ def _execution_from_row(row: sqlite3.Row) -> ExecutionRecord:
         approval_id=str(row["approval_id"]),
         event_id=str(row["event_id"]),
         action=ExecutionAction(row["action"]),
+        contact_id=str(row["contact_id"]),
+        tag=str(row["tag"]),
         status=ExecutionStatus(row["status"]),
-        started_at=_datetime(row["started_at"]),
+        created_at=_datetime(row["created_at"]),
+        claimed_at=_datetime(row["claimed_at"]),
         completed_at=_datetime(row["completed_at"]) if row["completed_at"] is not None else None,
-        result_code=(
-            ExecutionResultCode(row["result_code"]) if row["result_code"] is not None else None
-        ),
-        safe_summary=str(row["safe_summary"]) if row["safe_summary"] is not None else None,
-        actor_id=str(row["actor_id"]),
         failure_category=(
             ExecutionFailureCategory(row["failure_category"])
             if row["failure_category"] is not None
             else None
         ),
-        reconciled_at=(
-            _datetime(row["reconciled_at"]) if row["reconciled_at"] is not None else None
-        ),
-        reconciler_id=(str(row["reconciler_id"]) if row["reconciler_id"] is not None else None),
-        reconciliation_hash=(
-            str(row["reconciliation_hash"]) if row["reconciliation_hash"] is not None else None
-        ),
+        provenance_hash=str(row["provenance_hash"]),
+        policy_version=str(row["policy_version"]),
+        actor_id=str(row["actor_id"]),
     )
 
 
-def _effect_is_valid(
-    record: ExecutionRecord,
-    execution_row: sqlite3.Row,
-    effect_row: sqlite3.Row | None,
-) -> bool:
-    stored_hash = execution_row["effect_hash"]
-    if record.status is not ExecutionStatus.SUCCEEDED:
-        return effect_row is None and stored_hash is None
-    if effect_row is None or not isinstance(stored_hash, str):
-        return (
-            effect_row is None
-            and isinstance(stored_hash, str)
-            and hmac.compare_digest(sha256_hex(canonical_json_bytes(None)), stored_hash)
-        )
-    calculated = sha256_hex(
-        canonical_json_bytes(
-            {
-                "content": str(effect_row["content"]),
-                "object_id": (
-                    str(effect_row["object_id"]) if effect_row["object_id"] is not None else None
-                ),
-                "object_type": str(effect_row["object_type"]),
-            }
-        )
+def _reconciliation_from_row(row: sqlite3.Row) -> ReconciliationRecord:
+    return ReconciliationRecord(
+        assessment_id=str(row["assessment_id"]),
+        execution_id=str(row["execution_id"]),
+        approval_id=str(row["approval_id"]),
+        provenance_hash=str(row["provenance_hash"]),
+        policy_version=str(row["policy_version"]),
+        original_execution_integrity_hash=str(row["original_execution_integrity_hash"]),
+        actor_id=str(row["actor_id"]),
+        occurred_at=_datetime(row["occurred_at"]),
+        declared_outcome=ReconciliationOutcome(row["declared_outcome"]),
+        reason=str(row["reason"]),
+        previous_assessment_hash=str(row["previous_assessment_hash"]),
+        assessment_hash=str(row["assessment_hash"]),
     )
-    return hmac.compare_digest(calculated, stored_hash)
-
-
-def _reconciliation_is_valid(
-    record: ExecutionRecord,
-    row: sqlite3.Row,
-    policy_version: str,
-) -> bool:
-    values = (
-        row["reconciled_at"],
-        row["reconciler_id"],
-        row["reconciliation_reason"],
-        row["original_execution_hash"],
-        row["reconciliation_hash"],
-    )
-    reconciled = record.status in {
-        ExecutionStatus.RECONCILED_SUCCEEDED,
-        ExecutionStatus.RECONCILED_FAILED,
-    }
-    if not reconciled:
-        return all(value is None for value in values)
-    if not all(isinstance(value, str) for value in values):
-        return False
-    outcome = (
-        ReconciliationOutcome.SUCCEEDED
-        if record.status is ExecutionStatus.RECONCILED_SUCCEEDED
-        else ReconciliationOutcome.FAILED
-    )
-    expected = _reconciliation_hash(
-        execution_id=record.execution_id,
-        approval_id=record.approval_id,
-        event_id=record.event_id,
-        action=record.action,
-        original_status=ExecutionStatus.UNKNOWN,
-        outcome=outcome,
-        reason=str(row["reconciliation_reason"]),
-        policy_version=policy_version,
-        original_execution_hash=str(row["original_execution_hash"]),
-        reconciler_id=str(row["reconciler_id"]),
-        reconciled_at=str(row["reconciled_at"]),
-    )
-    return record.action is ExecutionAction.GHL_ADD_CONTACT_TAG and hmac.compare_digest(
-        expected, str(row["reconciliation_hash"])
-    )
-
-
-def _reconciliation_hash(
-    *,
-    execution_id: str,
-    approval_id: str,
-    event_id: str,
-    action: ExecutionAction,
-    original_status: ExecutionStatus,
-    outcome: ReconciliationOutcome,
-    reason: str,
-    policy_version: str,
-    original_execution_hash: str,
-    reconciler_id: str,
-    reconciled_at: str,
-) -> str:
-    return sha256_hex(
-        canonical_json_bytes(
-            {
-                "action": action.value,
-                "approval_id": approval_id,
-                "event_id": event_id,
-                "execution_id": execution_id,
-                "original_execution_hash": original_execution_hash,
-                "original_status": original_status.value,
-                "outcome": outcome.value,
-                "policy_version": policy_version,
-                "reason": reason,
-                "reconciled_at": reconciled_at,
-                "reconciler_id": reconciler_id,
-            }
-        )
-    )
-
-
-def _require_phase8_execution_schema(connection: sqlite3.Connection) -> None:
-    required = {
-        "reconciled_at",
-        "reconciler_id",
-        "reconciliation_reason",
-        "original_execution_hash",
-        "reconciliation_hash",
-    }
-    columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(executions)")}
-    if not required.issubset(columns):
-        raise SchemaCompatibilityError

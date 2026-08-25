@@ -54,7 +54,7 @@ class Settings(BaseSettings):
         default="approvals.sqlite3",
         min_length=9,
         max_length=240,
-        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.\\/-]*\.sqlite3$",
+        pattern=r"^[A-Za-z0-9.][A-Za-z0-9_.\\/-]*\.sqlite3$",
     )
     approval_ttl_seconds: int = Field(default=1_800, ge=60, le=86_400)
     approver_id: str = Field(
@@ -92,8 +92,13 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_configuration(self) -> "Settings":
-        if ".." in self.approval_database_path.replace("\\", "/").split("/"):
+        database_parts = self.approval_database_path.replace("\\", "/").split("/")
+        if ".." in database_parts:
             raise ValueError("approval database path cannot traverse parent directories")
+        if database_parts[0].startswith(".") and not (
+            self.environment is Environment.TEST and database_parts[0] == ".test-data"
+        ):
+            raise ValueError("hidden approval database paths are restricted to test data")
         slots = (
             (self.auth_token_1, self.auth_actor_1, self.auth_role_1),
             (self.auth_token_2, self.auth_actor_2, self.auth_role_2),

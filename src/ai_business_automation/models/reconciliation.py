@@ -1,14 +1,15 @@
-"""Strict operational reconciliation inputs and safe responses."""
+"""Strict append-only external assessment models for UNKNOWN executions."""
 
 import re
 import unicodedata
+from datetime import UTC
 from enum import StrEnum
-from typing import Annotated
+from typing import Annotated, Literal
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 
-from ai_business_automation.models.approvals import ActorId
+from ai_business_automation.models.approvals import ActorId, ApprovalId, Sha256Hex
 from ai_business_automation.models.executions import ExecutionId, ExecutionStatus
 
 MAX_RECONCILIATION_REASON_LENGTH = 500
@@ -26,6 +27,9 @@ class ReconciliationOutcome(StrEnum):
     FAILED = "FAILED"
 
 
+type AssessmentId = Annotated[
+    str, Field(min_length=24, max_length=40, pattern=r"^rcn_[A-Za-z0-9_-]+$")
+]
 type ReconciliationReason = Annotated[
     str, Field(min_length=1, max_length=MAX_RECONCILIATION_REASON_LENGTH)
 ]
@@ -65,11 +69,47 @@ class ReconciliationRequest(BaseModel):
         return sanitized
 
 
-class ReconciliationResponse(BaseModel):
+class ReconciliationRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
+    assessment_id: AssessmentId
     execution_id: ExecutionId
-    status: ExecutionStatus
-    result_code: Annotated[str, Field(pattern=r"^RECONCILED$")]
-    reconciled_at: AwareDatetime
-    reconciler_id: ActorId
+    approval_id: ApprovalId
+    provenance_hash: Sha256Hex
+    policy_version: Annotated[str, Field(pattern=r"^1\.0$")]
+    original_execution_integrity_hash: Sha256Hex
+    actor_id: ActorId
+    occurred_at: AwareDatetime
+    declared_outcome: ReconciliationOutcome
+    reason: ReconciliationReason
+    previous_assessment_hash: Sha256Hex
+    assessment_hash: Sha256Hex
+
+    @model_validator(mode="after")
+    def validate_timestamp(self) -> "ReconciliationRecord":
+        if self.occurred_at.utcoffset() != UTC.utcoffset(self.occurred_at):
+            raise ValueError("reconciliation timestamp must use UTC")
+        return self
+
+    def public(self) -> "ReconciliationResponse":
+        return ReconciliationResponse(
+            assessment_id=self.assessment_id,
+            execution_id=self.execution_id,
+            execution_status=ExecutionStatus.UNKNOWN,
+            declared_outcome=self.declared_outcome,
+            recorded_at=self.occurred_at,
+            actor_id=self.actor_id,
+        )
+
+
+class ReconciliationResponse(BaseModel):
+    """Safe assessment result; the execution itself remains permanently UNKNOWN."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    assessment_id: AssessmentId
+    execution_id: ExecutionId
+    execution_status: Literal[ExecutionStatus.UNKNOWN]
+    declared_outcome: ReconciliationOutcome
+    recorded_at: AwareDatetime
+    actor_id: ActorId

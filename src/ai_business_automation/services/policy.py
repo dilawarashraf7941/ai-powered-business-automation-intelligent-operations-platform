@@ -79,7 +79,7 @@ class DeterministicPolicyEngine:
         if event.event_type is EventType.GHL_CONTACT_TAG_REQUEST:
             return PolicyEvaluation(
                 decision=DecisionOutcome.REQUIRE_HUMAN_APPROVAL,
-                action=RecommendedAction.GHL_ADD_CONTACT_TAG,
+                action=RecommendedAction.ADD_CONTACT_TAG,
                 risk=RiskLevel.MEDIUM,
                 evidence=(
                     PolicyEvidence(

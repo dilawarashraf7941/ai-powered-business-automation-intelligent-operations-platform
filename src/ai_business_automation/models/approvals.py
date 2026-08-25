@@ -51,16 +51,12 @@ class AuditEventType(StrEnum):
     APPROVAL_REJECTED = "APPROVAL_REJECTED"
     APPROVAL_EXPIRED = "APPROVAL_EXPIRED"
     APPROVAL_TRANSITION_REJECTED = "APPROVAL_TRANSITION_REJECTED"
-    EXECUTION_CREATED = "EXECUTION_CREATED"
+    EXECUTION_AUTHORIZED = "EXECUTION_AUTHORIZED"
     EXECUTION_CLAIMED = "EXECUTION_CLAIMED"
     EXECUTION_SUCCEEDED = "EXECUTION_SUCCEEDED"
     EXECUTION_FAILED = "EXECUTION_FAILED"
     EXECUTION_UNKNOWN = "EXECUTION_UNKNOWN"
-    EXECUTION_REJECTED = "EXECUTION_REJECTED"
-    EXECUTION_RECONCILIATION_REQUESTED = "EXECUTION_RECONCILIATION_REQUESTED"
-    EXECUTION_RECONCILED_SUCCEEDED = "EXECUTION_RECONCILED_SUCCEEDED"
-    EXECUTION_RECONCILED_FAILED = "EXECUTION_RECONCILED_FAILED"
-    EXECUTION_RECONCILIATION_REJECTED = "EXECUTION_RECONCILIATION_REJECTED"
+    RECONCILIATION_RECORDED = "RECONCILIATION_RECORDED"
 
 
 type ApprovalId = Annotated[
@@ -114,7 +110,7 @@ class TrustedProvenance(BaseModel):
 
     @model_validator(mode="after")
     def validate_action_parameters(self) -> "TrustedProvenance":
-        requires_parameters = self.action is RecommendedAction.GHL_ADD_CONTACT_TAG
+        requires_parameters = self.action is RecommendedAction.ADD_CONTACT_TAG
         if requires_parameters != (self.action_parameters is not None):
             raise ValueError("trusted action parameters do not match the approved action")
         return self
@@ -171,7 +167,7 @@ class ApprovalRecord(BaseModel):
                 raise ValueError("rejected record is missing decision metadata")
         elif self.decided_at is None or self.approver_id is not None:
             raise ValueError("expired record has invalid terminal metadata")
-        requires_parameters = self.action is RecommendedAction.GHL_ADD_CONTACT_TAG
+        requires_parameters = self.action is RecommendedAction.ADD_CONTACT_TAG
         if requires_parameters != (self.action_parameters is not None):
             raise ValueError("approval action parameters do not match the action")
         return self
@@ -228,10 +224,7 @@ class AuditEvent(BaseModel):
     sequence_number: int = Field(ge=1, le=1_000_000)
     event_type: AuditEventType
     status: str = Field(
-        pattern=(
-            r"^(?:PENDING|APPROVED|REJECTED|EXPIRED|CLAIMED|SUCCEEDED|FAILED|UNKNOWN|"
-            r"RECONCILED_SUCCEEDED|RECONCILED_FAILED)$"
-        )
+        pattern=r"^(?:PENDING|APPROVED|REJECTED|EXPIRED|CLAIMED|SUCCEEDED|FAILED|UNKNOWN)$"
     )
     actor_id: ActorId
     occurred_at: AwareDatetime

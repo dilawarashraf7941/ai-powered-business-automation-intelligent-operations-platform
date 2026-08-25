@@ -1,29 +1,26 @@
-"""Phase 6 controlled internal action execution and security tests."""
+"""Phase 6 single-action execution boundary tests."""
 
 import json
+import logging
 import secrets
 import shutil
-import socket
 import sqlite3
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from threading import Barrier
-from typing import cast
+from threading import Barrier, Lock
+from typing import Literal, cast
 
+import httpx
 import pytest
-from fastapi.testclient import TestClient
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from ai_business_automation.api.routes import get_execution_service
 from ai_business_automation.config import Environment, Settings
 from ai_business_automation.main import create_app
 from ai_business_automation.models import (
-    ActionContext,
-    ActionOutcome,
-    ApprovalStatus,
     AuditEventType,
     BusinessIntelligenceResult,
     CanonicalBusinessEvent,
@@ -31,36 +28,40 @@ from ai_business_automation.models import (
     EventSource,
     EventType,
     ExecutionAction,
+    ExecutionFailureCategory,
     ExecutionRecord,
     ExecutionRequest,
-    ExecutionResultCode,
     ExecutionStatus,
     ExternalEvent,
-    HumanReviewInput,
+    GHLAddContactTagParameters,
+    GHLAddTagsRequest,
     Intent,
-    InternalActionEffect,
-    InternalNoteInput,
-    InternalPriority,
-    InternalStatus,
-    InternalStatusInput,
-    InternalTaskInput,
     Priority,
     RecommendedAction,
     RecommendedNextStep,
-    RiskLevel,
+    ReconciliationOutcome,
+    ReconciliationRequest,
     Urgency,
-    execution_action_for,
 )
+from ai_business_automation.providers import (
+    GHL_API_ORIGIN,
+    GHL_API_VERSION,
+    GHLClient,
+    GHLFailureCategory,
+    GHLOutcomeCertainty,
+    GHLProviderError,
+    UnavailableGHLProvider,
+)
+from ai_business_automation.providers.ghl_factory import create_ghl_provider
 from ai_business_automation.repositories import SQLiteExecutionRepository
-from ai_business_automation.services.actions import (
-    ActionRegistry,
-    DefinitiveActionFailure,
-    UnknownActionOutcome,
-)
+from ai_business_automation.services.actions import ContactTagExecutor
+from ai_business_automation.services.approval_errors import ProvenanceIntegrityError
 from ai_business_automation.services.approvals import ApprovalService
 from ai_business_automation.services.execution_errors import (
+    ActionNotAllowedError,
     ApprovalNotApprovedError,
     ApprovalProvenanceInvalidError,
+    ExecutionAlreadyAssessedError,
     ExecutionAlreadyClaimedError,
     ExecutionAlreadyCompletedError,
     ExecutionApprovalExpiredError,
@@ -71,21 +72,35 @@ from ai_business_automation.services.execution_errors import (
 from ai_business_automation.services.executions import ExecutionService
 from ai_business_automation.services.normalization import EventNormalizer
 from ai_business_automation.services.policy import DeterministicPolicyEngine, PolicyDecisionService
-from tests.auth_helpers import authenticated_client
+from ai_business_automation.services.reconciliation import ReconciliationService
+from tests.auth_helpers import auth_settings, authenticated_client
 
-FIXED_NOW = datetime(2026, 8, 24, 10, 0, tzinfo=UTC)
-EVENT_ID = "evt_phase6_fixed_identity"
+NOW = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
+EVENT_ID = "evt_phase6_contact_tag"
+CONTACT_ID = "contact_123456"
+TAG = "qualified-lead"
+TOKEN = "phase6-fake-token-not-a-secret"
 
 
 @dataclass
-class MutableClock:
-    value: datetime = FIXED_NOW
+class Clock:
+    value: datetime = NOW
 
     def __call__(self) -> datetime:
         return self.value
 
-    def advance(self, seconds: int) -> None:
-        self.value += timedelta(seconds=seconds)
+
+class RecordingProvider:
+    def __init__(self, error: GHLProviderError | Exception | None = None) -> None:
+        self.calls: list[GHLAddContactTagParameters] = []
+        self.error = error
+        self._lock = Lock()
+
+    def add_contact_tag(self, parameters: GHLAddContactTagParameters) -> None:
+        with self._lock:
+            self.calls.append(parameters)
+        if self.error is not None:
+            raise self.error
 
 
 @pytest.fixture
@@ -100,726 +115,704 @@ def phase6_tmp_path() -> Iterator[Path]:
         shutil.rmtree(path, ignore_errors=True)
 
 
-@pytest.fixture
-def execution_boundary(
-    phase6_tmp_path: Path,
-) -> tuple[ApprovalService, ExecutionService, SQLiteExecutionRepository, Path, MutableClock]:
-    database = phase6_tmp_path / "executions.sqlite3"
-    clock = MutableClock()
+def tag_event() -> CanonicalBusinessEvent:
+    return EventNormalizer(clock=lambda: NOW, event_id_factory=lambda: EVENT_ID).normalize(
+        ExternalEvent(
+            event_type=EventType.GHL_CONTACT_TAG_REQUEST,
+            source=EventSource.INTERNAL,
+            occurred_at=NOW - timedelta(minutes=1),
+            payload={"contact_id": CONTACT_ID, "tag": TAG},
+        )
+    )
+
+
+def ordinary_event() -> CanonicalBusinessEvent:
+    return EventNormalizer(
+        clock=lambda: NOW, event_id_factory=lambda: "evt_phase6_wrong_action"
+    ).normalize(
+        ExternalEvent(
+            event_type=EventType.CUSTOMER_REQUEST,
+            source=EventSource.API,
+            occurred_at=NOW - timedelta(minutes=1),
+            payload={"request_type": "review"},
+        )
+    )
+
+
+def intelligence(event_id: str = EVENT_ID) -> BusinessIntelligenceResult:
+    is_tag = event_id == EVENT_ID
+    return BusinessIntelligenceResult(
+        event_id=event_id,
+        category=EventCategory.INTERNAL if is_tag else EventCategory.CUSTOMER,
+        priority=Priority.LOW,
+        urgency=Urgency.LOW,
+        intent=Intent.INTERNAL if is_tag else Intent.SUPPORT,
+        confidence=0.93,
+        summary="A bounded mutation requires trusted human approval.",
+        reasons=["The deterministic policy requires an approval."],
+        recommended_next_step=(
+            RecommendedNextStep.REVIEW if is_tag else RecommendedNextStep.CONTACT_HUMAN
+        ),
+    )
+
+
+def boundary(
+    database: Path, provider: RecordingProvider, clock: Clock | None = None
+) -> tuple[ApprovalService, ExecutionService, SQLiteExecutionRepository, Clock]:
+    active_clock = clock or Clock()
     repository = SQLiteExecutionRepository(database)
     repository.initialize()
-    policy = PolicyDecisionService(DeterministicPolicyEngine(), clock=clock)
     approvals = ApprovalService(
         repository=repository,
-        policy_service=policy,
+        policy_service=PolicyDecisionService(DeterministicPolicyEngine(), clock=active_clock),
         ttl_seconds=1_800,
-        approver_id="development-approver",
-        clock=clock,
+        approver_id="phase6-approver",
+        clock=active_clock,
     )
     executions = ExecutionService(
         repository=repository,
-        registry=ActionRegistry(),
-        actor_id="development-approver",
-        clock=clock,
+        executor=ContactTagExecutor(provider),
+        actor_id="phase6-approver",
+        clock=active_clock,
     )
-    return approvals, executions, repository, database, clock
+    return approvals, executions, repository, active_clock
 
 
-def canonical_event() -> CanonicalBusinessEvent:
-    return EventNormalizer(clock=lambda: FIXED_NOW, event_id_factory=lambda: EVENT_ID).normalize(
-        ExternalEvent(
-            event_type=EventType.CUSTOMER_REQUEST,
-            source=EventSource.API,
-            occurred_at=FIXED_NOW - timedelta(minutes=1),
-            payload={"request_type": "internal-review"},
+def action_request(approval_id: str) -> ExecutionRequest:
+    return ExecutionRequest(approval_id=approval_id)
+
+
+def approved_boundary(
+    database: Path, provider: RecordingProvider
+) -> tuple[ApprovalService, ExecutionService, SQLiteExecutionRepository, str]:
+    approvals, executions, repository, _clock = boundary(database, provider)
+    created = approvals.create(tag_event(), intelligence())
+    approvals.approve(created.approval_id)
+    return approvals, executions, repository, created.approval_id
+
+
+def test_strict_request_and_provider_body() -> None:
+    parameters = GHLAddContactTagParameters(contact_id=CONTACT_ID, tag=TAG)
+    assert GHLAddTagsRequest(tags=(parameters.tag,)).model_dump(mode="json") == {"tags": [TAG]}
+    for value in ("short", "../contact_123", "https://evil.example", "contact id123"):
+        with pytest.raises(ValidationError):
+            GHLAddContactTagParameters(contact_id=value, tag=TAG)
+    for value in (" bad", "bad\nvalue", "https://evil", "Bearer abcdefghijklmnop", "x" * 51):
+        with pytest.raises(ValidationError):
+            GHLAddContactTagParameters(contact_id=CONTACT_ID, tag=value)
+    with pytest.raises(ValidationError):
+        ExecutionRequest.model_validate(
+            {
+                "approval_id": "apr_12345678901234567890",
+                "contact_id": CONTACT_ID,
+                "tag": TAG,
+                "url": "https://evil.example",
+            }
         )
+
+
+def test_policy_and_provenance_bind_exact_action(phase6_tmp_path: Path) -> None:
+    approvals, _executions, repository, _clock = boundary(
+        phase6_tmp_path / "binding.sqlite3", RecordingProvider()
     )
-
-
-def intelligence(
-    recommendation: RecommendedNextStep = RecommendedNextStep.CONTACT_HUMAN,
-) -> BusinessIntelligenceResult:
-    return BusinessIntelligenceResult(
-        event_id=EVENT_ID,
-        category=EventCategory.CUSTOMER,
-        priority=Priority.LOW,
-        urgency=Urgency.LOW,
-        intent=Intent.SUPPORT,
-        confidence=0.95,
-        summary="A bounded internal follow-up is recommended.",
-        reasons=["The recommendation requires human review."],
-        recommended_next_step=recommendation,
+    assert (
+        approvals.policy_service.decide(tag_event(), intelligence()).action
+        is RecommendedAction.ADD_CONTACT_TAG
     )
+    created = approvals.create(tag_event(), intelligence())
+    assert created.action_parameters == GHLAddContactTagParameters(contact_id=CONTACT_ID, tag=TAG)
+    assert repository.verify_audit_chain(created.approval_id)
 
 
-def approved_id(approvals: ApprovalService) -> str:
-    created = approvals.create(canonical_event(), intelligence())
-    return approvals.approve(created.approval_id).approval_id
-
-
-def test_approved_approval_executes_once_with_server_owned_identity(
-    execution_boundary: tuple[
-        ApprovalService, ExecutionService, SQLiteExecutionRepository, Path, MutableClock
-    ],
-) -> None:
-    approvals, executions, repository, database, _clock = execution_boundary
-    approval_id = approved_id(approvals)
-    result = executions.execute(approval_id)
-    assert result.execution_id.startswith("exe_")
-    assert result.approval_id == approval_id
-    assert result.event_id == EVENT_ID
-    assert result.action is ExecutionAction.REQUEST_HUMAN_REVIEW
-    assert result.status is ExecutionStatus.SUCCEEDED
-    assert result.result_code is ExecutionResultCode.COMPLETED
-    assert result.completed_at is not None
-    assert result.actor_id == "development-approver"
+def test_approved_action_executes_once_and_preserves_approval(phase6_tmp_path: Path) -> None:
+    provider = RecordingProvider()
+    approvals, executions, repository, approval_id = approved_boundary(
+        phase6_tmp_path / "success.sqlite3", provider
+    )
+    before = approvals.get(approval_id)
+    result = executions.execute(action_request(approval_id))
+    assert (result.status, result.action) == (
+        ExecutionStatus.SUCCEEDED,
+        ExecutionAction.ADD_CONTACT_TAG,
+    )
+    assert provider.calls == [GHLAddContactTagParameters(contact_id=CONTACT_ID, tag=TAG)]
     assert repository.verify_integrity(result.execution_id)
-    connection = sqlite3.connect(database)
-    try:
-        assert connection.execute("SELECT count(*) FROM internal_action_effects").fetchone() == (1,)
-    finally:
-        connection.close()
+    assert approvals.get(approval_id) == before
+    with pytest.raises(ExecutionAlreadyCompletedError):
+        executions.execute(action_request(approval_id))
+    assert len(provider.calls) == 1
 
 
-def test_internal_execution_makes_no_network_connection(
-    execution_boundary: tuple[
-        ApprovalService, ExecutionService, SQLiteExecutionRepository, Path, MutableClock
-    ],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    approvals, executions, _repository, _database, _clock = execution_boundary
+@pytest.mark.parametrize("transition", ["pending", "rejected", "expired"])
+def test_invalid_approval_never_calls_provider(phase6_tmp_path: Path, transition: str) -> None:
+    provider = RecordingProvider()
+    clock = Clock()
+    approvals, executions, _repository, _clock = boundary(
+        phase6_tmp_path / f"{transition}.sqlite3", provider, clock
+    )
+    created = approvals.create(tag_event(), intelligence())
+    if transition == "rejected":
+        approvals.reject(created.approval_id, "Not authorized by the reviewer.")
+    elif transition == "expired":
+        approvals.approve(created.approval_id)
+        clock.value += timedelta(seconds=1_801)
+    expected = (
+        ExecutionApprovalExpiredError if transition == "expired" else ApprovalNotApprovedError
+    )
+    with pytest.raises(expected):
+        executions.execute(action_request(created.approval_id))
+    assert provider.calls == []
 
-    def blocked_connect(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("controlled internal execution attempted a network connection")
 
-    monkeypatch.setattr(socket.socket, "connect", blocked_connect)
-    assert executions.execute(approved_id(approvals)).status is ExecutionStatus.SUCCEEDED
-
-
-def test_execution_storage_excludes_payload_ai_and_credentials(
-    execution_boundary: tuple[
-        ApprovalService, ExecutionService, SQLiteExecutionRepository, Path, MutableClock
-    ],
-) -> None:
-    approvals, executions, _repository, database, _clock = execution_boundary
-    payload_marker = "raw-payload-phase6-marker"
-    ai_marker = "raw-ai-response-phase6-marker"
-    credential_marker = "secret-credential-phase6-marker"
-    event = EventNormalizer(clock=lambda: FIXED_NOW, event_id_factory=lambda: EVENT_ID).normalize(
-        ExternalEvent(
-            event_type=EventType.CUSTOMER_REQUEST,
-            source=EventSource.API,
-            occurred_at=FIXED_NOW - timedelta(minutes=1),
-            payload={"safe_field": payload_marker},
+def test_wrong_action_or_inputs_never_call_provider(phase6_tmp_path: Path) -> None:
+    provider = RecordingProvider()
+    approvals, executions, _repository, _clock = boundary(
+        phase6_tmp_path / "wrong.sqlite3", provider
+    )
+    wrong = approvals.create(ordinary_event(), intelligence("evt_phase6_wrong_action"))
+    approvals.approve(wrong.approval_id)
+    with pytest.raises(ActionNotAllowedError):
+        executions.execute(action_request(wrong.approval_id))
+    approved = approvals.create(tag_event(), intelligence())
+    approvals.approve(approved.approval_id)
+    with pytest.raises(ValidationError):
+        ExecutionRequest.model_validate(
+            {
+                "approval_id": approved.approval_id,
+                "contact_id": CONTACT_ID,
+                "tag": "different",
+            }
         )
-    )
-    analysis = intelligence().model_copy(
-        update={"summary": ai_marker, "reasons": [credential_marker]}
-    )
-    approval = approvals.approve(approvals.create(event, analysis).approval_id)
-    executions.execute(approval.approval_id)
-    connection = sqlite3.connect(database)
-    try:
-        serialized = "\n".join(
-            str(value)
-            for table in ("executions", "internal_action_effects")
-            for row in connection.execute(f"SELECT * FROM {table}").fetchall()  # noqa: S608
-            for value in row
-        )
-    finally:
-        connection.close()
-    assert payload_marker not in serialized
-    assert ai_marker not in serialized
-    assert credential_marker not in serialized
+    assert provider.calls == []
 
 
-@pytest.mark.parametrize(
-    "terminal",
-    [ApprovalStatus.PENDING, ApprovalStatus.REJECTED, ApprovalStatus.EXPIRED],
-)
-def test_unapproved_terminal_states_cannot_execute(
-    execution_boundary: tuple[
-        ApprovalService, ExecutionService, SQLiteExecutionRepository, Path, MutableClock
-    ],
-    terminal: ApprovalStatus,
-) -> None:
-    approvals, executions, _repository, database, clock = execution_boundary
-    created = approvals.create(canonical_event(), intelligence())
-    if terminal is ApprovalStatus.REJECTED:
-        approvals.reject(created.approval_id, "Internal execution was not authorized.")
-    elif terminal is ApprovalStatus.EXPIRED:
-        clock.advance(1_801)
-        approvals.get(created.approval_id)
-    expected_error = (
-        ExecutionApprovalExpiredError
-        if terminal is ApprovalStatus.EXPIRED
-        else ApprovalNotApprovedError
-    )
-    with pytest.raises(expected_error):
-        executions.execute(created.approval_id)
-    assert _execution_count(database) == 0
-    assert _audit_types(database)[-1] == AuditEventType.EXECUTION_REJECTED.value
-
-
-def test_approved_but_ttl_expired_cannot_execute(
-    execution_boundary: tuple[
-        ApprovalService, ExecutionService, SQLiteExecutionRepository, Path, MutableClock
-    ],
-) -> None:
-    approvals, executions, _repository, database, clock = execution_boundary
-    approval_id = approved_id(approvals)
-    clock.advance(1_801)
-    with pytest.raises(ExecutionApprovalExpiredError):
-        executions.execute(approval_id)
-    assert _execution_count(database) == 0
-
-
-@pytest.mark.parametrize(
-    ("column", "value"),
-    [
-        ("provenance_hash", "f" * 64),
-        ("policy_version", "9.9"),
-        ("event_id", "evt_tampered_event_value"),
-        ("action", "ESCALATE"),
-    ],
-)
-def test_tampered_approval_provenance_prevents_handler_invocation(
-    execution_boundary: tuple[
-        ApprovalService, ExecutionService, SQLiteExecutionRepository, Path, MutableClock
-    ],
-    column: str,
-    value: str,
-) -> None:
-    approvals, executions, _repository, database, _clock = execution_boundary
-    approval_id = approved_id(approvals)
+@pytest.mark.parametrize("column", ["provenance_hash", "policy_version"])
+def test_tampered_provenance_or_policy_fails_closed(phase6_tmp_path: Path, column: str) -> None:
+    database = phase6_tmp_path / f"tamper-{column}.sqlite3"
+    provider = RecordingProvider()
+    approvals, executions, _repository, _clock = boundary(database, provider)
+    created = approvals.create(tag_event(), intelligence())
+    approvals.approve(created.approval_id)
     connection = sqlite3.connect(database)
     try:
         connection.execute("PRAGMA ignore_check_constraints = ON")
-        allowed_column = {
-            "provenance_hash": "provenance_hash",
-            "policy_version": "policy_version",
-            "event_id": "event_id",
-            "action": "action",
+        value = "0" * 64 if column == "provenance_hash" else "9.9"
+        query = {
+            "provenance_hash": "UPDATE approvals SET provenance_hash = ? WHERE approval_id = ?",
+            "policy_version": "UPDATE approvals SET policy_version = ? WHERE approval_id = ?",
         }[column]
         connection.execute(
-            f"UPDATE approvals SET {allowed_column} = ? WHERE approval_id = ?",  # noqa: S608
-            (value, approval_id),
+            query,
+            (value, created.approval_id),
         )
         connection.commit()
     finally:
         connection.close()
-    with pytest.raises(ApprovalProvenanceInvalidError):
-        executions.execute(approval_id)
-    assert _execution_count(database) == 0
-    assert _audit_types(database)[-1] == AuditEventType.EXECUTION_REJECTED.value
+    with pytest.raises((ApprovalProvenanceInvalidError, ExecutionIntegrityError)):
+        executions.execute(action_request(created.approval_id))
+    assert provider.calls == []
 
 
-def test_execution_request_structurally_rejects_all_authoritative_fields() -> None:
-    valid = "apr_abcdefghijklmnopqrstuvwxyz"
-    assert ExecutionRequest(approval_id=valid).approval_id == valid
-    for field in (
-        "execution_id",
-        "action",
-        "url",
-        "method",
-        "headers",
-        "body",
-        "credentials",
-        "command",
-        "module",
-        "callable",
-        "provider",
-        "retry_policy",
-        "timeout",
-        "actor_id",
-    ):
-        with pytest.raises(ValidationError):
-            ExecutionRequest.model_validate({"approval_id": valid, field: "client-controlled"})
-
-
-def test_action_taxonomy_and_mapping_are_closed() -> None:
-    assert set(ExecutionAction) == {
-        ExecutionAction.NO_OP,
-        ExecutionAction.CREATE_INTERNAL_TASK,
-        ExecutionAction.UPDATE_INTERNAL_STATUS,
-        ExecutionAction.REQUEST_HUMAN_REVIEW,
-        ExecutionAction.GENERATE_INTERNAL_NOTE,
-        ExecutionAction.GHL_ADD_CONTACT_TAG,
-    }
-    expected = {
-        RecommendedAction.NONE: ExecutionAction.NO_OP,
-        RecommendedAction.REVIEW: ExecutionAction.UPDATE_INTERNAL_STATUS,
-        RecommendedAction.CONTACT_HUMAN: ExecutionAction.REQUEST_HUMAN_REVIEW,
-        RecommendedAction.REQUEST_INFORMATION: ExecutionAction.CREATE_INTERNAL_TASK,
-        RecommendedAction.ESCALATE: ExecutionAction.CREATE_INTERNAL_TASK,
-        RecommendedAction.SCHEDULE_CONSULTATION: ExecutionAction.CREATE_INTERNAL_TASK,
-        RecommendedAction.NURTURE: ExecutionAction.GENERATE_INTERNAL_NOTE,
-        RecommendedAction.GHL_ADD_CONTACT_TAG: ExecutionAction.GHL_ADD_CONTACT_TAG,
-    }
-    assert {action: execution_action_for(action) for action in RecommendedAction} == expected
-    with pytest.raises(ValueError):
-        ExecutionAction("ARBITRARY_HTTP")
-
-
-def test_static_registry_executes_every_bounded_internal_handler() -> None:
-    registry = ActionRegistry()
-    assert registry.actions == frozenset(ExecutionAction)
-    internal_actions = set(ExecutionAction) - {ExecutionAction.GHL_ADD_CONTACT_TAG}
-    for action in internal_actions:
-        context = ActionContext(
-            execution_id="exe_abcdefghijklmnopqrstuvwxyz",
-            approval_id="apr_abcdefghijklmnopqrstuvwxyz",
-            event_id="evt_abcdefghijklmnopqrst",
-            action=action,
-            risk=RiskLevel.HIGH,
-            started_at=FIXED_NOW,
+def test_parameter_tampering_invalidates_provenance(phase6_tmp_path: Path) -> None:
+    database = phase6_tmp_path / "parameter-tamper.sqlite3"
+    approvals, _executions, repository, _clock = boundary(database, RecordingProvider())
+    created = approvals.create(tag_event(), intelligence())
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            "UPDATE approvals SET action_parameters_json = ? WHERE approval_id = ?",
+            (json.dumps({"contact_id": CONTACT_ID, "tag": "changed"}), created.approval_id),
         )
-        outcome = registry.execute(context)
-        assert outcome.result_code == "COMPLETED"
-        assert 1 <= len(outcome.safe_summary) <= 200
-        assert outcome.effect is not None
-        assert 1 <= len(outcome.effect.content) <= 1000
-    for risk, expected in (
-        (RiskLevel.LOW, "LOW"),
-        (RiskLevel.MEDIUM, "MEDIUM"),
-    ):
-        task = registry.execute(
-            ActionContext(
-                execution_id="exe_abcdefghijklmnopqrstuvwxyz",
-                approval_id="apr_abcdefghijklmnopqrstuvwxyz",
-                event_id="evt_abcdefghijklmnopqrst",
-                action=ExecutionAction.CREATE_INTERNAL_TASK,
-                risk=risk,
-                started_at=FIXED_NOW,
-            )
-        )
-        assert task.effect is not None
-        assert task.effect.content.endswith(expected)
+        connection.commit()
+    finally:
+        connection.close()
+    with pytest.raises(ProvenanceIntegrityError):
+        repository.get(created.approval_id, NOW)
 
 
-def test_bounded_action_input_and_output_models_reject_oversized_content() -> None:
-    with pytest.raises(ValidationError):
-        InternalTaskInput(title="x" * 201, description="valid", priority=InternalPriority.LOW)
-    with pytest.raises(ValidationError):
-        InternalTaskInput(title="valid", description="x" * 1001, priority=InternalPriority.LOW)
-    with pytest.raises(ValidationError):
-        InternalNoteInput(text="x" * 1001)
-    with pytest.raises(ValidationError):
-        HumanReviewInput(
-            approval_id="apr_abcdefghijklmnopqrstuvwxyz",
-            event_id="evt_abcdefghijklmnopqrst",
-            reason="x" * 501,
-        )
-    with pytest.raises(ValidationError):
-        InternalActionEffect(object_type="INTERNAL_NOTE", content="x" * 1001)
-    assert (
-        InternalStatusInput(
-            internal_reference="evt_abcdefghijklmnopqrst",
-            status=InternalStatus.REVIEW_REQUIRED,
-        ).status
-        is InternalStatus.REVIEW_REQUIRED
+def test_atomic_concurrent_claim_allows_one_call(phase6_tmp_path: Path) -> None:
+    provider = RecordingProvider()
+    _approvals, executions, repository, approval_id = approved_boundary(
+        phase6_tmp_path / "concurrent.sqlite3", provider
     )
-
-
-def test_execution_is_single_use_and_success_cannot_replay(
-    execution_boundary: tuple[
-        ApprovalService, ExecutionService, SQLiteExecutionRepository, Path, MutableClock
-    ],
-) -> None:
-    approvals, executions, _repository, database, _clock = execution_boundary
-    approval_id = approved_id(approvals)
-    first = executions.execute(approval_id)
-    with pytest.raises(ExecutionAlreadyCompletedError):
-        executions.execute(approval_id)
-    assert _execution_count(database) == 1
-    assert executions.get(first.execution_id) == first
-
-
-def test_atomic_claim_allows_only_one_concurrent_request(
-    execution_boundary: tuple[
-        ApprovalService, ExecutionService, SQLiteExecutionRepository, Path, MutableClock
-    ],
-) -> None:
-    approvals, _executions, repository, database, clock = execution_boundary
-    approval_id = approved_id(approvals)
     barrier = Barrier(2)
 
-    def claim() -> ExecutionRecord | type[Exception]:
+    def execute() -> str:
         barrier.wait()
         try:
-            return repository.claim(approval_id, clock.value, "development-approver")[0]
-        except Exception as exc:
-            return type(exc)
+            return executions.execute(action_request(approval_id)).status.value
+        except (ExecutionAlreadyClaimedError, ExecutionAlreadyCompletedError):
+            return "DUPLICATE"
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        results = [future.result() for future in [pool.submit(claim), pool.submit(claim)]]
-    assert sum(isinstance(result, ExecutionRecord) for result in results) == 1
-    assert any(result is ExecutionAlreadyClaimedError for result in results)
-    assert _execution_count(database) == 1
+        results = list(pool.map(lambda _index: execute(), range(2)))
+    assert sorted(results) == ["DUPLICATE", "SUCCEEDED"]
+    assert len(provider.calls) == 1
+    assert repository.verify_audit_chain(approval_id)
 
 
-class FailureRegistry(ActionRegistry):
-    def execute(self, context: ActionContext) -> ActionOutcome:
-        del context
-        raise DefinitiveActionFailure
+def test_second_repository_claim_rejects_an_existing_claim(phase6_tmp_path: Path) -> None:
+    provider = RecordingProvider()
+    _approvals, _executions, repository, approval_id = approved_boundary(
+        phase6_tmp_path / "already-claimed.sqlite3", provider
+    )
+    claimed, approval = repository.claim(approval_id, NOW, "phase6-approver")
+    assert claimed.status is ExecutionStatus.CLAIMED
+    assert approval.approval_id == approval_id
+    assert repository.verify_audit_chain(approval_id)
 
+    with pytest.raises(ExecutionAlreadyClaimedError):
+        repository.claim(approval_id, NOW, "phase6-approver")
 
-class UnknownRegistry(ActionRegistry):
-    def execute(self, context: ActionContext) -> ActionOutcome:
-        del context
-        raise UnknownActionOutcome
-
-
-class EmptyRegistry(ActionRegistry):
-    @property
-    def actions(self) -> frozenset[ExecutionAction]:
-        return frozenset()
+    assert provider.calls == []
+    assert repository.get_execution(claimed.execution_id).status is ExecutionStatus.CLAIMED
 
 
 @pytest.mark.parametrize(
-    ("registry", "expected_status", "expected_code", "audit_type"),
+    ("category", "certainty", "status", "failure"),
     [
         (
-            FailureRegistry(),
+            GHLFailureCategory.BAD_REQUEST,
+            GHLOutcomeCertainty.DEFINITIVE,
             ExecutionStatus.FAILED,
-            ExecutionResultCode.DEFINITIVE_FAILURE,
-            AuditEventType.EXECUTION_FAILED,
+            ExecutionFailureCategory.PROVIDER_BAD_REQUEST,
         ),
         (
-            UnknownRegistry(),
+            GHLFailureCategory.AUTHENTICATION,
+            GHLOutcomeCertainty.DEFINITIVE,
+            ExecutionStatus.FAILED,
+            ExecutionFailureCategory.PROVIDER_AUTHENTICATION,
+        ),
+        (
+            GHLFailureCategory.RATE_LIMIT,
+            GHLOutcomeCertainty.DEFINITIVE,
+            ExecutionStatus.FAILED,
+            ExecutionFailureCategory.PROVIDER_RATE_LIMIT,
+        ),
+        (
+            GHLFailureCategory.PROVIDER_ERROR,
+            GHLOutcomeCertainty.DEFINITIVE,
+            ExecutionStatus.FAILED,
+            ExecutionFailureCategory.PROVIDER_ERROR,
+        ),
+        (
+            GHLFailureCategory.UNAVAILABLE,
+            GHLOutcomeCertainty.DEFINITIVE,
+            ExecutionStatus.FAILED,
+            ExecutionFailureCategory.PROVIDER_UNAVAILABLE,
+        ),
+        (
+            GHLFailureCategory.TIMEOUT,
+            GHLOutcomeCertainty.UNKNOWN,
             ExecutionStatus.UNKNOWN,
-            ExecutionResultCode.OUTCOME_UNKNOWN,
-            AuditEventType.EXECUTION_UNKNOWN,
+            ExecutionFailureCategory.PROVIDER_TIMEOUT,
+        ),
+        (
+            GHLFailureCategory.UNKNOWN,
+            GHLOutcomeCertainty.UNKNOWN,
+            ExecutionStatus.UNKNOWN,
+            ExecutionFailureCategory.UNKNOWN_OUTCOME,
         ),
     ],
 )
-def test_failed_and_unknown_executions_are_terminal_without_retry(
-    execution_boundary: tuple[
-        ApprovalService, ExecutionService, SQLiteExecutionRepository, Path, MutableClock
-    ],
-    registry: ActionRegistry,
-    expected_status: ExecutionStatus,
-    expected_code: ExecutionResultCode,
-    audit_type: AuditEventType,
+def test_failures_are_durable_and_never_retried(
+    phase6_tmp_path: Path,
+    category: GHLFailureCategory,
+    certainty: GHLOutcomeCertainty,
+    status: ExecutionStatus,
+    failure: ExecutionFailureCategory,
 ) -> None:
-    approvals, _executions, repository, database, clock = execution_boundary
-    approval_id = approved_id(approvals)
-    service = ExecutionService(repository, registry, "development-approver", clock)
-    result = service.execute(approval_id)
-    assert result.status is expected_status
-    assert result.result_code is expected_code
-    assert _audit_types(database)[-1] == audit_type.value
+    provider = RecordingProvider(GHLProviderError(category, certainty))
+    _approvals, executions, repository, approval_id = approved_boundary(
+        phase6_tmp_path / f"failure-{category}.sqlite3", provider
+    )
+    result = executions.execute(action_request(approval_id))
+    assert (result.status, result.failure_category) == (status, failure)
+    assert repository.get_execution(result.execution_id) == result
     with pytest.raises(ExecutionAlreadyCompletedError):
-        service.execute(approval_id)
-    assert _execution_count(database) == 1
+        executions.execute(action_request(approval_id))
+    assert len(provider.calls) == 1
 
 
-def test_non_allowlisted_registry_result_fails_closed(
-    execution_boundary: tuple[
-        ApprovalService, ExecutionService, SQLiteExecutionRepository, Path, MutableClock
+def test_unexpected_exception_is_unknown(phase6_tmp_path: Path) -> None:
+    provider = RecordingProvider(RuntimeError("raw provider customer response"))
+    _approvals, executions, _repository, approval_id = approved_boundary(
+        phase6_tmp_path / "unknown.sqlite3", provider
+    )
+    result = executions.execute(action_request(approval_id))
+    assert (result.status, result.failure_category) == (
+        ExecutionStatus.UNKNOWN,
+        ExecutionFailureCategory.UNKNOWN_OUTCOME,
+    )
+    assert "raw provider" not in result.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    ("status_code", "category"),
+    [
+        (400, GHLFailureCategory.BAD_REQUEST),
+        (401, GHLFailureCategory.AUTHENTICATION),
+        (403, GHLFailureCategory.AUTHENTICATION),
+        (429, GHLFailureCategory.RATE_LIMIT),
+        (500, GHLFailureCategory.PROVIDER_ERROR),
     ],
+)
+def test_ghl_http_failures_are_safely_classified(
+    status_code: int, category: GHLFailureCategory
 ) -> None:
-    approvals, _executions, repository, _database, clock = execution_boundary
-    service = ExecutionService(repository, EmptyRegistry(), "development-approver", clock)
-    result = service.execute(approved_id(approvals))
-    assert result.status is ExecutionStatus.FAILED
-    assert result.safe_summary == "Action is not allowlisted."
-    assert service.verify_integrity(result.execution_id)
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(status_code, text="secret provider body")
+    )
+    client = GHLClient(SecretStr(TOKEN), "v3", 5.0, transport=transport)
+    with pytest.raises(GHLProviderError) as captured:
+        client.add_contact_tag(GHLAddContactTagParameters(contact_id=CONTACT_ID, tag=TAG))
+    assert captured.value.category is category
+    assert captured.value.certainty is GHLOutcomeCertainty.DEFINITIVE
+    assert "secret provider body" not in str(captured.value)
 
 
-def test_execution_audit_chain_contains_created_claimed_and_succeeded(
-    execution_boundary: tuple[
-        ApprovalService, ExecutionService, SQLiteExecutionRepository, Path, MutableClock
-    ],
+def test_ghl_contract_is_fixed_and_response_is_discarded() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request_: httpx.Request) -> httpx.Response:
+        captured.append(request_)
+        return httpx.Response(201, json={"tags": [TAG], "customer": "discarded"})
+
+    client = GHLClient(SecretStr(TOKEN), "v3", 5.0, transport=httpx.MockTransport(handler))
+    client.add_contact_tag(GHLAddContactTagParameters(contact_id=CONTACT_ID, tag=TAG))
+    sent = captured[0]
+    assert sent.method == "POST"
+    assert str(sent.url) == f"{GHL_API_ORIGIN}/contacts/{CONTACT_ID}/tags"
+    assert sent.headers["Version"] == GHL_API_VERSION
+    assert sent.headers["Authorization"] == f"Bearer {TOKEN}"
+    assert json.loads(sent.content) == {"tags": [TAG]}
+
+
+def test_transport_certainty_is_closed() -> None:
+    parameters = GHLAddContactTagParameters(contact_id=CONTACT_ID, tag=TAG)
+
+    def timeout(request_: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("ambiguous", request=request_)
+
+    def connect(request_: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("definite", request=request_)
+
+    cases = (
+        (timeout, GHLFailureCategory.TIMEOUT, GHLOutcomeCertainty.UNKNOWN),
+        (connect, GHLFailureCategory.UNAVAILABLE, GHLOutcomeCertainty.DEFINITIVE),
+    )
+    for handler, expected, certainty in cases:
+        client = GHLClient(SecretStr(TOKEN), "v3", 5.0, transport=httpx.MockTransport(handler))
+        with pytest.raises(GHLProviderError) as captured:
+            client.add_contact_tag(parameters)
+        assert (captured.value.category, captured.value.certainty) == (expected, certainty)
+
+
+def test_credentials_are_server_owned_and_not_logged_or_persisted(
+    phase6_tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    approvals, executions, repository, database, _clock = execution_boundary
-    result = executions.execute(approved_id(approvals))
-    audit_types = _audit_types(database)
-    assert audit_types[-3:] == [
-        AuditEventType.EXECUTION_CREATED.value,
+    assert isinstance(
+        create_ghl_provider(Settings(environment=Environment.TEST, ghl_api_key=TOKEN)), GHLClient
+    )
+    assert isinstance(
+        create_ghl_provider(Settings(environment=Environment.TEST)), UnavailableGHLProvider
+    )
+    database = phase6_tmp_path / "secrets.sqlite3"
+    _approvals, executions, _repository, approval_id = approved_boundary(
+        database, RecordingProvider()
+    )
+    with caplog.at_level(logging.INFO):
+        executions.execute(action_request(approval_id))
+    assert TOKEN not in caplog.text
+    assert TOKEN.encode() not in database.read_bytes()
+
+
+def test_execution_audit_and_integrity_guards(phase6_tmp_path: Path) -> None:
+    database = phase6_tmp_path / "audit.sqlite3"
+    _approvals, executions, repository, approval_id = approved_boundary(
+        database, RecordingProvider()
+    )
+    result = executions.execute(action_request(approval_id))
+    connection = sqlite3.connect(database)
+    try:
+        values = [
+            row[0]
+            for row in connection.execute(
+                "SELECT event_type FROM approval_audit_events WHERE approval_id = ? "
+                "ORDER BY sequence_number",
+                (approval_id,),
+            )
+        ]
+    finally:
+        connection.close()
+    assert values[-3:] == [
+        AuditEventType.EXECUTION_AUTHORIZED.value,
         AuditEventType.EXECUTION_CLAIMED.value,
         AuditEventType.EXECUTION_SUCCEEDED.value,
     ]
-    assert repository.verify_audit_chain(result.approval_id)
     assert repository.verify_integrity(result.execution_id)
-
-
-@pytest.mark.parametrize(
-    ("table", "column", "value"),
-    [
-        ("approval_audit_events", "actor_id", "tampered-actor"),
-        ("executions", "safe_summary", "Tampered execution summary."),
-        ("internal_action_effects", "content", "Tampered internal effect."),
-    ],
-)
-def test_execution_and_audit_tampering_is_detected(
-    execution_boundary: tuple[
-        ApprovalService, ExecutionService, SQLiteExecutionRepository, Path, MutableClock
-    ],
-    table: str,
-    column: str,
-    value: str,
-) -> None:
-    approvals, executions, repository, database, _clock = execution_boundary
-    result = executions.execute(approved_id(approvals))
-    allowed = {
-        ("approval_audit_events", "actor_id"),
-        ("executions", "safe_summary"),
-        ("internal_action_effects", "content"),
-    }
-    assert (table, column) in allowed
+    with pytest.raises(ExecutionAlreadyCompletedError):
+        repository.complete(
+            result.execution_id,
+            ExecutionStatus.FAILED,
+            NOW,
+            ExecutionFailureCategory.INTERNAL_ERROR,
+        )
+    with pytest.raises(ExecutionConflictError):
+        repository.complete(result.execution_id, ExecutionStatus.CLAIMED, NOW, None)
+    with pytest.raises(ExecutionConflictError):
+        repository.complete(
+            result.execution_id,
+            ExecutionStatus.SUCCEEDED,
+            NOW,
+            ExecutionFailureCategory.INTERNAL_ERROR,
+        )
+    with pytest.raises(ExecutionNotFoundError):
+        repository.get_execution("exe_12345678901234567890")
     connection = sqlite3.connect(database)
     try:
-        key = "approval_id" if table == "approval_audit_events" else "execution_id"
-        key_value = result.approval_id if key == "approval_id" else result.execution_id
         connection.execute(
-            f"UPDATE {table} SET {column} = ? WHERE {key} = ?",  # noqa: S608
-            (value, key_value),
+            "UPDATE executions SET tag = 'tampered' WHERE execution_id = ?",
+            (result.execution_id,),
         )
         connection.commit()
     finally:
         connection.close()
     assert not repository.verify_integrity(result.execution_id)
     with pytest.raises(ExecutionIntegrityError):
-        executions.get(result.execution_id)
+        repository.get_execution(result.execution_id)
 
 
-def test_execution_repository_rejects_invalid_completion_and_unknown_identity(
-    execution_boundary: tuple[
-        ApprovalService, ExecutionService, SQLiteExecutionRepository, Path, MutableClock
-    ],
-) -> None:
-    approvals, _executions, repository, _database, clock = execution_boundary
-    approval_id = approved_id(approvals)
-    claimed, _approval = repository.claim(approval_id, clock.value, "development-approver")
-    with pytest.raises(ExecutionConflictError):
-        repository.complete(
-            claimed.execution_id,
-            ExecutionStatus.CLAIMED,
-            clock.value,
-            "invalid",
-        )
-    with pytest.raises(ExecutionConflictError):
-        repository.complete(
-            claimed.execution_id,
-            ExecutionStatus.SUCCEEDED,
-            clock.value,
-            "missing outcome",
-        )
-    outcome = ActionOutcome(
-        result_code="COMPLETED",
-        safe_summary="Bounded outcome.",
-        effect=InternalActionEffect(object_type="NONE", content="NO_OP"),
+def test_api_returns_only_safe_bounded_result(phase6_tmp_path: Path) -> None:
+    _approvals, executions, _repository, approval_id = approved_boundary(
+        phase6_tmp_path / "api.sqlite3", RecordingProvider()
     )
-    with pytest.raises(ExecutionConflictError):
-        repository.complete(
-            claimed.execution_id,
-            ExecutionStatus.FAILED,
-            clock.value,
-            "invalid effect",
-            outcome,
-        )
-    with pytest.raises(ExecutionNotFoundError):
-        repository.get_execution("exe_abcdefghijklmnopqrstuvwxyz")
-
-
-def test_execution_model_rejects_inconsistent_lifecycle_and_non_utc() -> None:
-    base: dict[str, object] = {
-        "execution_id": "exe_abcdefghijklmnopqrstuvwxyz",
-        "approval_id": "apr_abcdefghijklmnopqrstuvwxyz",
-        "event_id": "evt_abcdefghijklmnopqrst",
-        "action": ExecutionAction.NO_OP,
-        "status": ExecutionStatus.SUCCEEDED,
-        "started_at": FIXED_NOW,
-        "completed_at": FIXED_NOW,
-        "result_code": ExecutionResultCode.COMPLETED,
-        "safe_summary": "Complete.",
-        "actor_id": "development-approver",
-    }
-    for updates in (
-        {"completed_at": None},
-        {"result_code": None, "safe_summary": None},
-        {"result_code": ExecutionResultCode.OUTCOME_UNKNOWN},
-        {"started_at": FIXED_NOW.astimezone(timezone(timedelta(hours=1)))},
-    ):
-        with pytest.raises(ValidationError):
-            ExecutionRecord.model_validate({**base, **updates})
-
-
-def test_completed_execution_rejects_direct_completion_replay(
-    execution_boundary: tuple[
-        ApprovalService, ExecutionService, SQLiteExecutionRepository, Path, MutableClock
-    ],
-) -> None:
-    approvals, executions, repository, _database, clock = execution_boundary
-    result = executions.execute(approved_id(approvals))
-    with pytest.raises(ExecutionAlreadyCompletedError):
-        repository.complete(
-            result.execution_id,
-            ExecutionStatus.SUCCEEDED,
-            clock.value,
-            "Replay is prohibited.",
-            ActionRegistry().execute(
-                ActionContext(
-                    execution_id=result.execution_id,
-                    approval_id=result.approval_id,
-                    event_id=result.event_id,
-                    action=result.action,
-                    risk=RiskLevel.MEDIUM,
-                    started_at=result.started_at,
-                )
-            ),
-        )
-
-
-def test_broken_approval_audit_chain_prevents_claim(
-    execution_boundary: tuple[
-        ApprovalService, ExecutionService, SQLiteExecutionRepository, Path, MutableClock
-    ],
-) -> None:
-    approvals, executions, _repository, database, _clock = execution_boundary
-    approval_id = approved_id(approvals)
-    connection = sqlite3.connect(database)
-    try:
-        connection.execute(
-            "UPDATE approval_audit_events SET event_hash = ? WHERE sequence_number = 1",
-            ("f" * 64,),
-        )
-        connection.commit()
-    finally:
-        connection.close()
-    with pytest.raises(ExecutionIntegrityError):
-        executions.execute(approval_id)
-
-
-def test_execution_read_rechecks_approval_provenance(
-    execution_boundary: tuple[
-        ApprovalService, ExecutionService, SQLiteExecutionRepository, Path, MutableClock
-    ],
-) -> None:
-    approvals, executions, _repository, database, _clock = execution_boundary
-    result = executions.execute(approved_id(approvals))
-    connection = sqlite3.connect(database)
-    try:
-        connection.execute(
-            "UPDATE approvals SET provenance_hash = ? WHERE approval_id = ?",
-            ("f" * 64, result.approval_id),
-        )
-        connection.commit()
-    finally:
-        connection.close()
-    with pytest.raises(ApprovalProvenanceInvalidError):
-        executions.get(result.execution_id)
-
-
-@pytest.fixture
-def execution_client(
-    execution_boundary: tuple[
-        ApprovalService, ExecutionService, SQLiteExecutionRepository, Path, MutableClock
-    ],
-) -> Iterator[tuple[TestClient, ApprovalService, ExecutionService]]:
-    approvals, executions, _repository, _database, _clock = execution_boundary
-    app = create_app(Settings(environment=Environment.TEST))
+    app = create_app(auth_settings(approval_database_path=str(phase6_tmp_path / "api.sqlite3")))
     app.dependency_overrides[get_execution_service] = lambda: executions
     with authenticated_client(app) as client:
-        yield client, approvals, executions
-
-
-def test_execution_api_returns_safe_result_and_status(
-    execution_client: tuple[TestClient, ApprovalService, ExecutionService],
-) -> None:
-    client, approvals, _executions = execution_client
-    approval_id = approved_id(approvals)
-    response = client.post(
-        "/api/v1/actions/execute",
-        json={"approval_id": approval_id},
-        headers={"X-Request-ID": "phase6-request-id"},
-    )
+        response = client.post(
+            "/api/v1/actions/contact-tag",
+            json={"approval_id": approval_id},
+        )
+        invalid = client.post(
+            "/api/v1/actions/contact-tag",
+            json={
+                "approval_id": approval_id,
+                "contact_id": CONTACT_ID,
+                "tag": TAG,
+                "url": "https://evil.example",
+            },
+        )
     assert response.status_code == 200
-    assert response.headers["X-Request-ID"]
-    assert response.headers["X-Request-ID"] != "phase6-request-id"
-    body = response.json()
-    assert body["status"] == "SUCCEEDED"
-    assert body["action"] == "REQUEST_HUMAN_REVIEW"
-    assert set(body) == {
-        "execution_id",
-        "approval_id",
-        "event_id",
-        "action",
-        "status",
-        "started_at",
-        "completed_at",
-        "result_code",
-        "safe_summary",
+    assert response.json() == {
+        "execution_id": response.json()["execution_id"],
+        "status": "SUCCEEDED",
+        "action": "ADD_CONTACT_TAG",
     }
-    serialized = json.dumps(body).lower()
-    for prohibited in ("payload", "credential", "provider", "prompt", "actor_id", "effect"):
-        assert prohibited not in serialized
-    status_response = client.get(f"/api/v1/actions/executions/{body['execution_id']}")
-    assert status_response.status_code == 200
-    assert status_response.json() == body
+    assert invalid.status_code == 422
+    assert invalid.json()["error"]["code"] == "ACTION_VALIDATION_ERROR"
+    assert TOKEN not in response.text
 
 
-@pytest.mark.parametrize(
-    "field",
-    [
-        "execution_id",
-        "action",
-        "url",
-        "method",
-        "headers",
-        "body",
-        "credentials",
-        "module",
-        "callable",
-    ],
-)
-def test_execution_api_rejects_client_controlled_capabilities(
-    execution_client: tuple[TestClient, ApprovalService, ExecutionService], field: str
+def test_no_generic_or_ai_direct_execution_capability_exists() -> None:
+    root = Path("src/ai_business_automation")
+    action_source = (root / "services/actions.py").read_text(encoding="utf-8")
+    provider_source = (root / "providers/ghl.py").read_text(encoding="utf-8")
+    routes_source = (root / "api/routes.py").read_text(encoding="utf-8")
+    combined = action_source + routes_source
+    assert "ActionRegistry" not in combined
+    assert "subprocess" not in combined
+    assert "os.system" not in combined
+    assert "n8n" not in combined.lower()
+    assert "client.request(" not in provider_source
+    assert "client.post(" in provider_source
+    assert "/api/v1/actions/execute" not in routes_source
+    assert list(ExecutionAction) == [ExecutionAction.ADD_CONTACT_TAG]
+
+
+def test_execution_record_rejects_invalid_lifecycle_combinations(
+    phase6_tmp_path: Path,
 ) -> None:
-    client, approvals, _executions = execution_client
-    approval_id = approved_id(approvals)
-    response = client.post(
-        "/api/v1/actions/execute",
-        json={"approval_id": approval_id, field: "client-controlled"},
+    _approvals, executions, _repository, approval_id = approved_boundary(
+        phase6_tmp_path / "record-validation.sqlite3", RecordingProvider()
     )
-    assert response.status_code == 422
-    assert response.json()["error"]["code"] == "ACTION_VALIDATION_ERROR"
+    record = executions.execute(action_request(approval_id))
+    values = record.model_dump()
+
+    invalid_updates = (
+        {"created_at": datetime(2026, 8, 24, 12, 0)},
+        {"status": ExecutionStatus.PENDING, "completed_at": record.completed_at},
+        {"failure_category": ExecutionFailureCategory.INTERNAL_ERROR},
+        {
+            "status": ExecutionStatus.FAILED,
+            "completed_at": record.completed_at,
+            "failure_category": None,
+        },
+    )
+    for updates in invalid_updates:
+        with pytest.raises(ValidationError):
+            ExecutionRecord.model_validate({**values, **updates})
 
 
-def test_execution_api_returns_stable_errors_without_internal_details(
-    execution_client: tuple[TestClient, ApprovalService, ExecutionService],
+def test_provider_configuration_and_unavailable_boundary_are_fail_closed() -> None:
+    with pytest.raises(ValueError, match="unsupported GHL API version"):
+        GHLClient(SecretStr(TOKEN), cast(Literal["v3"], "v2"), 5.0)
+    for timeout_seconds in (0.5, 31.0):
+        with pytest.raises(ValueError, match="timeout"):
+            GHLClient(SecretStr(TOKEN), "v3", timeout_seconds)
+    with pytest.raises(GHLProviderError) as unavailable:
+        UnavailableGHLProvider().add_contact_tag(
+            GHLAddContactTagParameters(contact_id=CONTACT_ID, tag=TAG)
+        )
+    assert unavailable.value.category is GHLFailureCategory.AUTHENTICATION
+    assert unavailable.value.certainty is GHLOutcomeCertainty.DEFINITIVE
+
+
+def test_ambiguous_request_error_and_oversized_response_are_unknown() -> None:
+    parameters = GHLAddContactTagParameters(contact_id=CONTACT_ID, tag=TAG)
+
+    def interrupted(request_: httpx.Request) -> httpx.Response:
+        raise httpx.ReadError("connection interrupted", request=request_)
+
+    transports = (
+        httpx.MockTransport(interrupted),
+        httpx.MockTransport(lambda _request: httpx.Response(201, content=b"x" * 4_097)),
+    )
+    for transport in transports:
+        client = GHLClient(SecretStr(TOKEN), "v3", 5.0, transport=transport)
+        with pytest.raises(GHLProviderError) as captured:
+            client.add_contact_tag(parameters)
+        assert captured.value.category is GHLFailureCategory.UNKNOWN
+        assert captured.value.certainty is GHLOutcomeCertainty.UNKNOWN
+
+
+def test_unexpected_provider_status_is_definite_provider_error() -> None:
+    client = GHLClient(
+        SecretStr(TOKEN),
+        "v3",
+        5.0,
+        transport=httpx.MockTransport(lambda _request: httpx.Response(418)),
+    )
+    with pytest.raises(GHLProviderError) as captured:
+        client.add_contact_tag(GHLAddContactTagParameters(contact_id=CONTACT_ID, tag=TAG))
+    assert captured.value.category is GHLFailureCategory.PROVIDER_ERROR
+    assert captured.value.certainty is GHLOutcomeCertainty.DEFINITIVE
+
+
+def test_execution_service_read_integrity_and_utc_clock_guards(phase6_tmp_path: Path) -> None:
+    provider = RecordingProvider()
+    _approvals, executions, _repository, approval_id = approved_boundary(
+        phase6_tmp_path / "service-helpers.sqlite3", provider
+    )
+    completed = executions.execute(action_request(approval_id))
+    assert executions.get(completed.execution_id) == completed
+    assert executions.verify_integrity(completed.execution_id)
+
+    approvals, invalid_clock_service, _repository, invalid_clock = boundary(
+        phase6_tmp_path / "naive-clock.sqlite3", provider
+    )
+    created = approvals.create(tag_event(), intelligence())
+    approvals.approve(created.approval_id)
+    invalid_clock.value = datetime(2026, 8, 24, 12, 0)
+    with pytest.raises(ValueError, match="UTC"):
+        invalid_clock_service.execute(action_request(created.approval_id))
+
+
+@pytest.mark.parametrize("target", ["audit", "provenance"])
+def test_post_execution_trust_record_tampering_is_detected(
+    phase6_tmp_path: Path, target: str
 ) -> None:
-    client, approvals, _executions = execution_client
-    pending = approvals.create(canonical_event(), intelligence())
-    response = client.post("/api/v1/actions/execute", json={"approval_id": pending.approval_id})
-    assert response.status_code == 409
-    assert response.json()["error"]["code"] == "APPROVAL_NOT_APPROVED"
-    not_found = client.get("/api/v1/actions/executions/exe_abcdefghijklmnopqrstuvwxyz")
-    assert not_found.status_code == 404
-    assert not_found.json()["error"]["code"] == "EXECUTION_NOT_FOUND"
-    for body in (response.json(), not_found.json()):
-        serialized = json.dumps(body).lower()
-        assert ".sqlite3" not in serialized
-        assert "traceback" not in serialized
-
-
-def _execution_count(database: Path) -> int:
+    database = phase6_tmp_path / f"post-execution-{target}.sqlite3"
+    _approvals, executions, repository, approval_id = approved_boundary(
+        database, RecordingProvider()
+    )
+    completed = executions.execute(action_request(approval_id))
     connection = sqlite3.connect(database)
     try:
-        return cast(int, connection.execute("SELECT count(*) FROM executions").fetchone()[0])
+        if target == "audit":
+            connection.execute(
+                "UPDATE approval_audit_events SET actor_id = 'tampered' "
+                "WHERE approval_id = ? AND sequence_number = 1",
+                (approval_id,),
+            )
+        else:
+            connection.execute(
+                "UPDATE approvals SET provenance_hash = ? WHERE approval_id = ?",
+                ("0" * 64, approval_id),
+            )
+        connection.commit()
     finally:
         connection.close()
+    assert not repository.verify_integrity(completed.execution_id)
+    expected = ExecutionIntegrityError if target == "audit" else ApprovalProvenanceInvalidError
+    with pytest.raises(expected):
+        repository.get_execution(completed.execution_id)
 
 
-def _audit_types(database: Path) -> list[str]:
-    connection = sqlite3.connect(database)
+def test_safe_api_error_for_unapproved_execution(phase6_tmp_path: Path) -> None:
+    provider = RecordingProvider()
+    approvals, executions, _repository, _clock = boundary(
+        phase6_tmp_path / "api-pending.sqlite3", provider
+    )
+    pending = approvals.create(tag_event(), intelligence())
+    app = create_app(
+        auth_settings(approval_database_path=str(phase6_tmp_path / "api-pending.sqlite3"))
+    )
+    app.dependency_overrides[get_execution_service] = lambda: executions
+    with authenticated_client(app) as client:
+        response = client.post(
+            "/api/v1/actions/contact-tag",
+            json={"approval_id": pending.approval_id},
+        )
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "APPROVAL_NOT_APPROVED"
+    assert "traceback" not in response.text.lower()
+    assert provider.calls == []
+
+
+def test_unknown_execution_assessment_is_append_only_and_never_replays(
+    phase6_tmp_path: Path,
+) -> None:
+    provider = RecordingProvider(
+        GHLProviderError(GHLFailureCategory.TIMEOUT, GHLOutcomeCertainty.UNKNOWN)
+    )
+    _approvals, executions, repository, approval_id = approved_boundary(
+        phase6_tmp_path / "assessment.sqlite3", provider
+    )
+    execution = executions.execute(action_request(approval_id), "authenticated-executor")
+    assert execution.status is ExecutionStatus.UNKNOWN
+    before = repository.get_execution(execution.execution_id)
+    reconciliation = ReconciliationService(
+        repository, "server-fallback", Clock(NOW + timedelta(minutes=1))
+    )
+    response = reconciliation.reconcile(
+        execution.execution_id,
+        ReconciliationRequest(
+            outcome=ReconciliationOutcome.SUCCEEDED,
+            reason="Verified in the provider console.",
+        ),
+        "authenticated-executor",
+    )
+    after = repository.get_execution(execution.execution_id)
+    assert before == after
+    assert response.execution_status is ExecutionStatus.UNKNOWN
+    assert response.declared_outcome is ReconciliationOutcome.SUCCEEDED
+    assert response.actor_id == "authenticated-executor"
+    assert len(provider.calls) == 1
+    with pytest.raises(ExecutionAlreadyAssessedError):
+        reconciliation.reconcile(
+            execution.execution_id,
+            ReconciliationRequest(
+                outcome=ReconciliationOutcome.FAILED,
+                reason="A conflicting assessment must be rejected.",
+            ),
+            "authenticated-executor",
+        )
+    connection = sqlite3.connect(phase6_tmp_path / "assessment.sqlite3")
     try:
-        return [
-            cast(str, row[0])
-            for row in connection.execute(
-                "SELECT event_type FROM approval_audit_events ORDER BY sequence_number"
-            ).fetchall()
-        ]
+        with pytest.raises(sqlite3.IntegrityError, match="immutable history"):
+            connection.execute(
+                "UPDATE execution_reconciliation_assessments SET declared_outcome = 'FAILED'"
+            )
     finally:
         connection.close()

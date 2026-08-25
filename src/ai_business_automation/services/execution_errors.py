@@ -80,32 +80,15 @@ class ExecutionPersistenceError(ExecutionBoundaryError):
 
 class ExecutionNotReconciliableError(ExecutionBoundaryError):
     code = "EXECUTION_NOT_RECONCILIABLE"
-    safe_message = "Execution is not eligible for reconciliation."
+    safe_message = "Only an UNKNOWN contact-tag execution can be assessed."
 
 
-class ExecutionAlreadyReconciledError(ExecutionBoundaryError):
-    code = "EXECUTION_ALREADY_RECONCILED"
-    safe_message = "Execution has already been reconciled."
+class ExecutionAlreadyAssessedError(ExecutionBoundaryError):
+    code = "EXECUTION_ALREADY_ASSESSED"
+    safe_message = "Execution already has an external assessment."
 
 
-class ReconciliationNotAuthorizedError(ExecutionBoundaryError):
-    code = "RECONCILIATION_NOT_AUTHORIZED"
-    safe_message = "Reconciliation is not authorized."
-    status_code = 403
-
-
-class ReconciliationValidationError(ExecutionBoundaryError):
-    code = "RECONCILIATION_VALIDATION_ERROR"
-    safe_message = "Reconciliation input is invalid."
-    status_code = 422
-
-
-class ReconciliationConflictError(ExecutionBoundaryError):
-    code = "RECONCILIATION_CONFLICT"
-    safe_message = "Reconciliation conflicted with another transition."
-
-
-class ReconciliationApprovalIntegrityError(ExecutionBoundaryError):
-    code = "APPROVAL_INTEGRITY_FAILURE"
-    safe_message = "Approval integrity verification failed."
+class ReconciliationIntegrityError(ExecutionBoundaryError):
+    code = "RECONCILIATION_INTEGRITY_FAILURE"
+    safe_message = "External assessment integrity verification failed."
     status_code = 500

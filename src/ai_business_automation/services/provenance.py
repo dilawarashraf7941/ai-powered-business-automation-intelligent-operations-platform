@@ -32,7 +32,7 @@ def sha256_hex(value: bytes) -> str:
 
 
 def chained_audit_hash(payload: object, previous_event_hash: str) -> str:
-    """Apply the single shared hash-chain primitive to canonical audit data."""
+    """Apply the shared hash-chain primitive to canonical audit data."""
 
     return sha256_hex(canonical_json_bytes(payload) + previous_event_hash.encode("ascii"))
 
@@ -47,7 +47,7 @@ def build_trusted_provenance(
     intelligence_bytes = canonical_json_bytes(intelligence.model_dump(mode="json"))
     action_parameters = (
         GHLAddContactTagParameters.model_validate(event.payload)
-        if decision.action is RecommendedAction.GHL_ADD_CONTACT_TAG
+        if decision.action is RecommendedAction.ADD_CONTACT_TAG
         else None
     )
     return TrustedProvenance(

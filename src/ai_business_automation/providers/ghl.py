@@ -23,19 +23,17 @@ class GHLOutcomeCertainty(StrEnum):
 
 
 class GHLFailureCategory(StrEnum):
-    AUTHENTICATION = "GHL_AUTHENTICATION"
-    AUTHORIZATION = "GHL_AUTHORIZATION"
-    RATE_LIMIT = "GHL_RATE_LIMIT"
-    VALIDATION = "GHL_VALIDATION"
-    NOT_FOUND = "GHL_NOT_FOUND"
-    TIMEOUT = "GHL_TIMEOUT"
-    NETWORK = "GHL_NETWORK"
-    SERVER_ERROR = "GHL_SERVER_ERROR"
-    UNKNOWN = "GHL_UNKNOWN"
+    AUTHENTICATION = "AUTHENTICATION"
+    RATE_LIMIT = "RATE_LIMIT"
+    BAD_REQUEST = "BAD_REQUEST"
+    UNAVAILABLE = "UNAVAILABLE"
+    TIMEOUT = "TIMEOUT"
+    PROVIDER_ERROR = "PROVIDER_ERROR"
+    UNKNOWN = "UNKNOWN"
 
 
 class GHLProviderError(Exception):
-    """Safe classified failure with no provider body or transport detail."""
+    """Safe classified failure with no response body or transport detail."""
 
     def __init__(self, category: GHLFailureCategory, certainty: GHLOutcomeCertainty) -> None:
         self.category = category
@@ -49,14 +47,9 @@ class GHLProvider(Protocol):
 
 
 class UnavailableGHLProvider:
-    """No-network fallback used when the server secret is not configured."""
-
     def add_contact_tag(self, parameters: GHLAddContactTagParameters) -> None:
         del parameters
-        raise GHLProviderError(
-            GHLFailureCategory.AUTHENTICATION,
-            GHLOutcomeCertainty.DEFINITIVE,
-        )
+        raise GHLProviderError(GHLFailureCategory.AUTHENTICATION, GHLOutcomeCertainty.DEFINITIVE)
 
 
 class GHLClient:
@@ -81,7 +74,6 @@ class GHLClient:
 
     def add_contact_tag(self, parameters: GHLAddContactTagParameters) -> None:
         trusted = GHLAddContactTagParameters.model_validate(parameters)
-        body = GHLAddTagsRequest(tags=trusted.tags)
         endpoint = f"{GHL_API_ORIGIN}/contacts/{trusted.contact_id}/tags"
         headers = {
             "Authorization": f"Bearer {self._api_key.get_secret_value()}",
@@ -98,66 +90,39 @@ class GHLClient:
                 response = client.post(
                     endpoint,
                     headers=headers,
-                    json=body.model_dump(mode="json"),
+                    json=GHLAddTagsRequest(tags=(trusted.tag,)).model_dump(mode="json"),
                 )
         except httpx.TimeoutException as exc:
-            raise GHLProviderError(
-                GHLFailureCategory.TIMEOUT,
-                GHLOutcomeCertainty.UNKNOWN,
-            ) from exc
+            raise GHLProviderError(GHLFailureCategory.TIMEOUT, GHLOutcomeCertainty.UNKNOWN) from exc
         except httpx.ConnectError as exc:
             raise GHLProviderError(
-                GHLFailureCategory.NETWORK,
-                GHLOutcomeCertainty.DEFINITIVE,
+                GHLFailureCategory.UNAVAILABLE, GHLOutcomeCertainty.DEFINITIVE
             ) from exc
         except httpx.RequestError as exc:
-            raise GHLProviderError(
-                GHLFailureCategory.NETWORK,
-                GHLOutcomeCertainty.UNKNOWN,
-            ) from exc
+            raise GHLProviderError(GHLFailureCategory.UNKNOWN, GHLOutcomeCertainty.UNKNOWN) from exc
 
         if response.status_code == 201:
-            self._validate_success(response, trusted)
+            self._validate_success(response, trusted.tag)
             return
-        category = {
-            400: GHLFailureCategory.VALIDATION,
-            401: GHLFailureCategory.AUTHENTICATION,
-            403: GHLFailureCategory.AUTHORIZATION,
-            404: GHLFailureCategory.NOT_FOUND,
-            422: GHLFailureCategory.VALIDATION,
-            429: GHLFailureCategory.RATE_LIMIT,
-        }.get(response.status_code)
-        if category is not None:
-            raise GHLProviderError(category, GHLOutcomeCertainty.DEFINITIVE)
-        if 500 <= response.status_code <= 599:
-            raise GHLProviderError(
-                GHLFailureCategory.SERVER_ERROR,
-                GHLOutcomeCertainty.DEFINITIVE,
-            )
-        raise GHLProviderError(
-            GHLFailureCategory.UNKNOWN,
-            GHLOutcomeCertainty.UNKNOWN,
-        )
+        if response.status_code in {400, 404, 422}:
+            category = GHLFailureCategory.BAD_REQUEST
+        elif response.status_code in {401, 403}:
+            category = GHLFailureCategory.AUTHENTICATION
+        elif response.status_code == 429:
+            category = GHLFailureCategory.RATE_LIMIT
+        elif 500 <= response.status_code <= 599:
+            category = GHLFailureCategory.PROVIDER_ERROR
+        else:
+            category = GHLFailureCategory.PROVIDER_ERROR
+        raise GHLProviderError(category, GHLOutcomeCertainty.DEFINITIVE)
 
     @staticmethod
-    def _validate_success(
-        response: httpx.Response,
-        requested: GHLAddContactTagParameters,
-    ) -> None:
+    def _validate_success(response: httpx.Response, requested_tag: str) -> None:
         if len(response.content) > MAX_GHL_RESPONSE_BYTES:
-            raise GHLProviderError(
-                GHLFailureCategory.UNKNOWN,
-                GHLOutcomeCertainty.UNKNOWN,
-            )
+            raise GHLProviderError(GHLFailureCategory.UNKNOWN, GHLOutcomeCertainty.UNKNOWN)
         try:
             parsed = GHLAddTagsResponse.model_validate(response.json())
         except (ValueError, ValidationError) as exc:
-            raise GHLProviderError(
-                GHLFailureCategory.UNKNOWN,
-                GHLOutcomeCertainty.UNKNOWN,
-            ) from exc
-        if not set(requested.tags).issubset(set(parsed.tags)):
-            raise GHLProviderError(
-                GHLFailureCategory.UNKNOWN,
-                GHLOutcomeCertainty.UNKNOWN,
-            )
+            raise GHLProviderError(GHLFailureCategory.UNKNOWN, GHLOutcomeCertainty.UNKNOWN) from exc
+        if requested_tag not in parsed.tags:
+            raise GHLProviderError(GHLFailureCategory.UNKNOWN, GHLOutcomeCertainty.UNKNOWN)

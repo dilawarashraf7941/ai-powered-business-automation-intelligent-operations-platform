@@ -46,14 +46,7 @@ from ai_business_automation.services.provenance import (
 )
 
 _SYSTEM_ACTOR = "SYSTEM"
-_SCHEMA_VERSION = 8
 _SCHEMA = """
-CREATE TABLE IF NOT EXISTS schema_metadata (
-    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-    schema_version INTEGER NOT NULL CHECK(schema_version = 8)
-);
-INSERT OR IGNORE INTO schema_metadata (singleton, schema_version) VALUES (1, 8);
-
 CREATE TABLE IF NOT EXISTS approvals (
     approval_id TEXT PRIMARY KEY CHECK(length(approval_id) BETWEEN 24 AND 40),
     event_id TEXT NOT NULL CHECK(length(event_id) BETWEEN 20 AND 40),
@@ -63,7 +56,7 @@ CREATE TABLE IF NOT EXISTS approvals (
     decision TEXT NOT NULL CHECK(decision = 'REQUIRE_HUMAN_APPROVAL'),
     action TEXT NOT NULL CHECK(action IN (
         'NONE', 'REVIEW', 'CONTACT_HUMAN', 'REQUEST_INFORMATION', 'ESCALATE',
-        'SCHEDULE_CONSULTATION', 'NURTURE', 'GHL_ADD_CONTACT_TAG'
+        'SCHEDULE_CONSULTATION', 'NURTURE', 'ADD_CONTACT_TAG'
     )),
     risk TEXT NOT NULL CHECK(risk IN ('LOW', 'MEDIUM', 'HIGH', 'CRITICAL')),
     confidence REAL NOT NULL CHECK(confidence >= 0.0 AND confidence <= 1.0),
@@ -92,10 +85,8 @@ CREATE TABLE IF NOT EXISTS approval_audit_events (
     event_type TEXT NOT NULL CHECK(event_type IN (
         'APPROVAL_CREATED', 'APPROVAL_APPROVED', 'APPROVAL_REJECTED',
         'APPROVAL_EXPIRED', 'APPROVAL_TRANSITION_REJECTED',
-        'EXECUTION_CREATED', 'EXECUTION_CLAIMED', 'EXECUTION_SUCCEEDED',
-        'EXECUTION_FAILED', 'EXECUTION_UNKNOWN', 'EXECUTION_REJECTED',
-        'EXECUTION_RECONCILIATION_REQUESTED', 'EXECUTION_RECONCILED_SUCCEEDED',
-        'EXECUTION_RECONCILED_FAILED', 'EXECUTION_RECONCILIATION_REJECTED'
+        'EXECUTION_AUTHORIZED', 'EXECUTION_CLAIMED', 'EXECUTION_SUCCEEDED',
+        'EXECUTION_FAILED', 'EXECUTION_UNKNOWN'
     )),
     execution_id TEXT CHECK(
         execution_id IS NULL OR length(execution_id) BETWEEN 24 AND 40
@@ -109,8 +100,7 @@ CREATE TABLE IF NOT EXISTS approval_audit_events (
     ),
     status TEXT NOT NULL CHECK(status IN (
         'PENDING', 'APPROVED', 'REJECTED', 'EXPIRED',
-        'CLAIMED', 'SUCCEEDED', 'FAILED', 'UNKNOWN',
-        'RECONCILED_SUCCEEDED', 'RECONCILED_FAILED'
+        'CLAIMED', 'SUCCEEDED', 'FAILED', 'UNKNOWN'
     )),
     actor_id TEXT NOT NULL CHECK(length(actor_id) BETWEEN 1 AND 64),
     occurred_at TEXT NOT NULL CHECK(length(occurred_at) BETWEEN 20 AND 40),
@@ -128,8 +118,6 @@ ON approval_audit_events(approval_id, sequence_number);
 @runtime_checkable
 class ApprovalRepository(Protocol):
     def initialize(self) -> None: ...
-
-    def check_readiness(self) -> None: ...
 
     def create(
         self,
@@ -166,31 +154,17 @@ class SQLiteApprovalRepository:
         self._audit_id_factory = audit_id_factory or _new_audit_id
 
     def initialize(self) -> None:
-        connection = self._connect()
-        try:
-            _require_compatible_or_empty_schema(connection)
-            connection.executescript(_SCHEMA)
-        except SchemaCompatibilityError:
-            raise
-        except sqlite3.Error as exc:
-            raise ApprovalPersistenceError from exc
-        finally:
-            connection.close()
+        from ai_business_automation.repositories.migrations import ensure_active_schema
+
+        ensure_active_schema(self._database_path)
 
     def check_readiness(self) -> None:
-        """Perform a bounded local connectivity and schema compatibility check."""
+        from ai_business_automation.repositories.migrations import ensure_active_schema
 
-        connection = self._connect()
         try:
-            _require_compatible_or_empty_schema(connection)
-            if connection.execute("SELECT 1").fetchone() is None:
-                raise ApprovalPersistenceError
-        except (SchemaCompatibilityError, ApprovalPersistenceError):
+            ensure_active_schema(self._database_path)
+        except (ApprovalPersistenceError, SchemaCompatibilityError):
             raise
-        except sqlite3.Error as exc:
-            raise ApprovalPersistenceError from exc
-        finally:
-            connection.close()
 
     def create(
         self,
@@ -543,8 +517,8 @@ class SQLiteApprovalRepository:
             """
             INSERT INTO approval_audit_events (
                 audit_event_id, approval_id, sequence_number, event_type,
-                execution_id, event_id, failure_category, commitment_hash, status, actor_id,
-                occurred_at,
+                execution_id, event_id, failure_category, commitment_hash,
+                status, actor_id, occurred_at,
                 previous_event_hash, event_hash
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
@@ -577,24 +551,6 @@ class SQLiteApprovalRepository:
 
 def _new_audit_id() -> str:
     return f"aud_{secrets.token_urlsafe(18)}"
-
-
-def _require_compatible_or_empty_schema(connection: sqlite3.Connection) -> None:
-    tables = {
-        str(row[0])
-        for row in connection.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
-        ).fetchall()
-    }
-    if not tables:
-        return
-    if "schema_metadata" not in tables:
-        raise SchemaCompatibilityError
-    row = connection.execute(
-        "SELECT schema_version FROM schema_metadata WHERE singleton = 1"
-    ).fetchone()
-    if row is None or int(row[0]) != _SCHEMA_VERSION:
-        raise SchemaCompatibilityError
 
 
 def _datetime_text(value: datetime) -> str:
